@@ -16,7 +16,7 @@ import org.junit.Test
  */
 class TestOptimalSampleRates {
 
-    private val rtltcp = RtltcpSource("localhost", 1234) // 1, 1.4, 1.8, 2, 2.4, 2.5 MSps
+    private val rtltcp = RtltcpSource("localhost", 1234) // 1, 1.4, 1.8, 2, 2.048 (DAB), 2.4, 2.5 MSps
 
     @Test
     fun higherIsTheNextSupportedRateAboveOrTheHighest() {
@@ -30,7 +30,8 @@ class TestOptimalSampleRates {
     @Test
     fun lowerIsTheNextSupportedRateBelowOrTheLowest() {
         assertEquals(2_400_000, rtltcp.getNextLowerOptimalSampleRate(2_500_000))
-        assertEquals(2_000_000, rtltcp.getNextLowerOptimalSampleRate(2_200_000))
+        assertEquals(2_048_000, rtltcp.getNextLowerOptimalSampleRate(2_200_000))
+        assertEquals(2_000_000, rtltcp.getNextLowerOptimalSampleRate(2_040_000))
         assertEquals(1_800_000, rtltcp.getNextLowerOptimalSampleRate(2_000_000))
         assertEquals(1_000_000, rtltcp.getNextLowerOptimalSampleRate(1_000_000))
         assertEquals(2_500_000, rtltcp.getNextLowerOptimalSampleRate(9_000_000))
