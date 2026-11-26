@@ -192,6 +192,12 @@ private fun StatusRow(s: DabState) {
         if (s.sync) Text("SNR ${s.snrDb} dB · FIC ${s.quality.ficPercent}%", style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace)
     }
+    // Without sync: what reaches the receiver, to tell a reception problem from a decoder one.
+    if (s.active && !s.sync) Text(
+        "Input %.2f Msps (needs 2.05) · level %.0f dBFS · dropped %d".format(Locale.US, s.inputRate / 1e6, s.inputLevelDb, s.droppedSamples),
+        style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace,
+        color = if (s.inputRate < 1_900_000 || s.droppedSamples > 0 || s.inputLevelDb < -60) Bad else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -413,6 +419,8 @@ private fun SignalPage(s: DabState) {
         Metric("Audio rate", "${s.audioRate} Hz")
         Metric("Audio buffer", "${s.audioBufferedMs} ms")
         Metric("Dropped input", "${s.droppedSamples}")
+        Metric("Input rate", "%.3f Msps".format(Locale.US, s.inputRate / 1e6))
+        Metric("Input level", "%.1f dBFS".format(Locale.US, s.inputLevelDb))
     }
     Spacer(Modifier.height(10.dp))
     Text("Constellation (DQPSK, after differential demodulation)", style = MaterialTheme.typography.labelMedium)

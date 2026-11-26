@@ -35,6 +35,11 @@ class DabReceiver {
     private var pendingSid = -1L
     private var lastSelectAttemptMs = 0L
     private var firstServiceMs = 0L
+    private var inputCount = 0L
+    private var inputPower = 0.0
+    private var inputPowerN = 0L
+    private var gaps = 0
+    private var lastPacketEndMs = 0L
 
     // audio
     private val pcm = ShortArray(16_384)
@@ -104,6 +109,11 @@ class DabReceiver {
             state = state.copy(frequencyHz = frequencyHz)
         }
 
+        inputCount += n
+        var p = 0.0
+        var i = 0
+        while (i < n) { p += re[i] * re[i] + im[i] * im[i]; i += 16 }
+        inputPower += p; inputPowerN += (n + 15) / 16
         val dropped = NativeDab.nativePush(handle, re, im, n)
         if (dropped > 0) Log.d(TAG, "process: receiver behind, dropped $dropped samples")
 
@@ -124,7 +134,6 @@ class DabReceiver {
         owedFrames = minOf(owedFrames + n.toDouble() * audioRate / INPUT_RATE, audioRate.toDouble())
 
         if (now - lastStatusMs >= STATUS_INTERVAL_MS) {
-            lastStatusMs = now
             if (now - lastDescribeMs >= 1000) {
                 lastDescribeMs = now
                 for (svc in state.services) if (!svc.described) NativeDab.nativeDescribeService(handle, svc.sid.toInt())
@@ -133,12 +142,20 @@ class DabReceiver {
                 val k = NativeDab.nativePollConstellation(handle, constellation)
                 if (k > 0) LocalDab.publishConstellation(constellation.copyOf(2 * k))
             }
+            val dt = (now - lastStatusMs).coerceAtLeast(1)
+            val rateNow = (inputCount * 1000 / dt).toInt()
+            val level = if (inputPowerN > 0) (10 * kotlin.math.log10(inputPower / inputPowerN + 1e-12)).toFloat() else -120f
+            if (!state.sync) Log.d(TAG, "status: no sync, input $rateNow S/s, level %.1f dBFS, dropped ${NativeDab.nativeDroppedSamples(handle)}".format(level))
+            inputCount = 0; inputPower = 0.0; inputPowerN = 0
             state = state.copy(
+                inputRate = rateNow,
+                inputLevelDb = level,
                 audioRate = audioRate,
                 audioBufferedMs = fifoCount * 1000 / audioRate.coerceAtLeast(1),
                 droppedSamples = NativeDab.nativeDroppedSamples(handle).toLong() and 0xFFFFFFFFL,
                 secondsSinceTune = ((now - tuneTimeMs) / 1000).toInt(),
             )
+            lastStatusMs = now
             changed = true
         }
         if (changed) LocalDab.publish(state)

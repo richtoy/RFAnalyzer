@@ -122,6 +122,12 @@ data class DabState(
     val audioRate: Int = 48_000,
     val audioBufferedMs: Int = 0,
     val droppedSamples: Long = 0,
+    /** Input actually arriving at the receiver (samples per second over the last status interval). */
+    val inputRate: Int = 0,
+    /** Input level (RMS) in dBFS. */
+    val inputLevelDb: Float = -120f,
+    /** Packets the receiver got since the last status, and how many had a gap in time before them. */
+    val inputGaps: Int = 0,
     val transmitters: List<DabTransmitter> = emptyList(),
     /** Seconds since the last retune (for "searching..." messages). */
     val secondsSinceTune: Int = 0,
