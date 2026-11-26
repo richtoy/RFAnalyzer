@@ -185,8 +185,8 @@ class DabReceiver {
             pendingSid = when {
                 // only once the receiver is synced and has read the service's subchannel (FIG 0/1, 0/2)
                 !state.sync -> -1
-                remembered >= 0 && state.services.any { it.sid == remembered && it.described } -> remembered
-                now - firstServiceMs > 4000 -> state.services.firstOrNull { it.isAudio == true }?.sid ?: -1
+                remembered >= 0 && !LocalDab.isSuspect(remembered) && state.services.any { it.sid == remembered && it.described } -> remembered
+                now - firstServiceMs > 4000 -> state.services.firstOrNull { it.isAudio == true && !LocalDab.isSuspect(it.sid) }?.sid ?: -1
                 else -> -1
             }
         }
@@ -195,7 +195,9 @@ class DabReceiver {
             LocalDab.guardPlaying(pendingSid)
             guardSetMs = now
             if (NativeDab.nativeSelectServiceBySid(handle, pendingSid.toInt())) {
-                Log.i(TAG, "selected service %04X".format(pendingSid))
+                val svc = state.services.firstOrNull { it.sid == pendingSid }
+                Log.i(TAG, "selected service %04X %s: %s %d kbps, %s, subch %d, CU %d+%d".format(pendingSid, svc?.label ?: "?",
+                    svc?.codec ?: "?", svc?.bitrateKbps ?: 0, svc?.protection ?: "?", svc?.subchId ?: -1, svc?.startCu ?: -1, svc?.lengthCu ?: 0))
                 clearAudio()
                 state = state.copy(selectedSid = pendingSid)
                 pendingSid = -1
@@ -204,7 +206,7 @@ class DabReceiver {
             pendingSid = -1
         }
         // 30 s of playing without a crash: the service is fine
-        if (guardSetMs > 0 && now - guardSetMs > 30_000) { LocalDab.clearPlayingGuard(); guardSetMs = 0 }
+        if (guardSetMs > 0 && now - guardSetMs > 30_000 && state.selectedSid >= 0) { LocalDab.clearPlayingGuard(state.selectedSid); guardSetMs = 0 }
     }
 
     private fun pullAudio() {

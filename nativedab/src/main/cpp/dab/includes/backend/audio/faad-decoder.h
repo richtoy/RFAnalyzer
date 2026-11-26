@@ -170,7 +170,11 @@ NeAACDecFrameInfo	hInfo;
 	}
 	else
 	if (channels == 1) {
-	   int16_t *buffer = (int16_t *)alloca (2 * samples);
+	   // RFAnalyzer fix: was alloca (2 * samples), i.e. bytes for half the int16 written
+	   // below: every mono DAB+ service smashed the stack (SIGSEGV on selection).
+	   if (samples <= 0 || samples > 4096)
+	      return 0;
+	   int16_t *buffer = (int16_t *)alloca (2 * samples * sizeof (int16_t));
 	   int16_t i;
 	   for (i = 0; i < samples; i ++) {
 	      buffer [2 * i]	= ((int16_t *)outBuffer) [i];

@@ -64,9 +64,13 @@ object LocalDab {
     fun init(context: Context) {
         if (prefs == null) {
             prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            // The guard stays until the service has played 30 s or the user picks a station:
+            // Android restarts a crashed service in a new process, which must not auto-play again.
             crashedSid = prefs?.getLong("playing_guard", -1L) ?: -1L
-            if (crashedSid >= 0) Log.w(TAG, "init: the last session ended while playing %04X: no auto-play".format(crashedSid))
-            prefs?.edit()?.remove("playing_guard")?.commit()
+            if (crashedSid >= 0) {
+                Log.w(TAG, "init: the last session ended while playing %04X: no auto-play".format(crashedSid))
+                prefs?.edit()?.putStringSet("crashed_sids", crashedSids() + crashedSid.toString())?.commit()
+            }
         }
         if (_scan.value.found.isEmpty()) _scan.value = _scan.value.copy(found = loadEnsembles())
     }
@@ -87,11 +91,21 @@ object LocalDab {
         tuner?.invoke("DAB ${channel.name}", channel.frequencyHz) ?: Log.w(TAG, "tuneToChannel: no tuner installed")
     }
 
-    /** The service last chosen in the ensemble ([s]'s EId, else its channel), or -1. */
     /** Written synchronously (commit) before the receiver starts a service, so it survives a native crash. */
     internal fun guardPlaying(sid: Long) { prefs?.edit()?.putLong("playing_guard", sid)?.commit() }
-    internal fun clearPlayingGuard() { prefs?.edit()?.remove("playing_guard")?.apply() }
+    /** The service played fine for a while: no longer suspected of crashing. */
+    internal fun clearPlayingGuard(sid: Long = -1) {
+        val e = prefs?.edit() ?: return
+        e.remove("playing_guard")
+        if (sid >= 0) e.putStringSet("crashed_sids", crashedSids() - sid.toString())
+        e.apply()
+    }
 
+    /** Services that were playing when a session crashed: never started automatically. */
+    internal fun crashedSids(): Set<String> = prefs?.getStringSet("crashed_sids", emptySet())?.toSet() ?: emptySet()
+    internal fun isSuspect(sid: Long) = crashedSids().contains(sid.toString())
+
+    /** The service last chosen in the ensemble ([s]'s EId, else its channel), or -1. */
     internal fun rememberedSid(s: DabState): Long = prefs?.getLong(prefKey(s), -1L) ?: -1L
     private fun prefKey(s: DabState) = if (s.ensembleId >= 0) "sid_e${s.ensembleId}" else "sid_f${s.frequencyHz / 1000}"
 

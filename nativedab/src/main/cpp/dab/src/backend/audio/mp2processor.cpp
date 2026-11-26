@@ -26,6 +26,7 @@
 //	- it is made into a class for use within the framework
 //	of the sdr-j DAB/DAB+ software
 //
+#include <algorithm>
 #include	"mp2processor.h"
 
 #ifdef _MSC_VER
@@ -244,7 +245,9 @@ int16_t *nPtr = &N [0][0];
 	Voffs		= 0;
 	baudRate	= 48000;	// default for DAB
 	MP2framesize	= 24 * bitRate;	// may be changed
-	MP2frame	= new uint8_t [2 * MP2framesize];
+	// RFAnalyzer: at low bitrates 2 * 24 * bitRate bytes is less than the largest frame
+	// a (corrupt) header can announce, which the decoder then reads past.
+	MP2frame	= new uint8_t [std::max (2 * MP2framesize, 2 * KJMP2_MAX_FRAME_SIZE + 16)] ();
 	MP2Header_OK	= 0;
 	MP2headerCount	= 0;
 	MP2bitCount	= 0;
