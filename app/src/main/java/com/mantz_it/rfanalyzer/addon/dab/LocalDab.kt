@@ -64,7 +64,7 @@ object LocalDab {
     fun init(context: Context) {
         if (prefs == null) {
             prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            // The guard stays until the service has played 30 s or the user picks a station:
+            // The guard stays until the service has played 10 s of audio or the user picks a station:
             // Android restarts a crashed service in a new process, which must not auto-play again.
             crashedSid = prefs?.getLong("playing_guard", -1L) ?: -1L
             if (crashedSid >= 0) {

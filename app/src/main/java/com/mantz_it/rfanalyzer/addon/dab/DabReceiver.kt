@@ -36,6 +36,8 @@ class DabReceiver {
     private var lastSelectAttemptMs = 0L
     private var firstServiceMs = 0L
     private var guardSetMs = 0L
+    private var playedMs = 0L
+    private var lastSelectionTickMs = 0L
     private var inputCount = 0L
     private var inputPower = 0.0
     private var inputPowerN = 0L
@@ -91,6 +93,20 @@ class DabReceiver {
         Log.i(TAG, "native receiver released")
     }
 
+    @Synchronized
+    private fun recreateNative(): Boolean {
+        val h = handle
+        handle = 0L
+        try {
+            NativeDab.nativeStop(h)
+            NativeDab.nativeDestroy(h)
+        } catch (e: Throwable) {
+            Log.w(TAG, "recreate: ${e.message}")
+        }
+        Log.i(TAG, "new channel: native receiver recreated")
+        return ensureStarted()
+    }
+
     private fun clearAudio() {
         fifoRead = 0; fifoWrite = 0; fifoCount = 0; playing = false; owedFrames = 0.0
     }
@@ -102,7 +118,9 @@ class DabReceiver {
         if (!ensureStarted()) return
         val now = System.currentTimeMillis()
         if (kotlin.math.abs(frequencyHz - state.frequencyHz) > 100_000 || !state.active) {
-            if (state.active) NativeDab.nativeReset(handle)
+            // A new channel gets a fresh native receiver, as a stop/start of the source does:
+            // nativeReset() kept MSC/audio state from the old ensemble and left it silent.
+            if (state.active && !recreateNative()) return
             state = DabState(active = true, frequencyHz = frequencyHz)
             tuneTimeMs = now
             pendingSid = -1; firstServiceMs = 0; handledRequest = LocalDab.requestSerial
@@ -194,6 +212,7 @@ class DabReceiver {
             lastSelectAttemptMs = now
             LocalDab.guardPlaying(pendingSid)
             guardSetMs = now
+            playedMs = 0
             if (NativeDab.nativeSelectServiceBySid(handle, pendingSid.toInt())) {
                 val svc = state.services.firstOrNull { it.sid == pendingSid }
                 Log.i(TAG, "selected service %04X %s: %s %d kbps, %s, subch %d, CU %d+%d".format(pendingSid, svc?.label ?: "?",
@@ -205,8 +224,11 @@ class DabReceiver {
         } else if (pendingSid == state.selectedSid) {
             pendingSid = -1
         }
-        // 30 s of playing without a crash: the service is fine
-        if (guardSetMs > 0 && now - guardSetMs > 30_000 && state.selectedSid >= 0) { LocalDab.clearPlayingGuard(state.selectedSid); guardSetMs = 0 }
+        // Audio has played for 10 s without a crash (the crashes came within a second): the service is fine.
+        // Not 30 s: closing the app soon after picking a station would otherwise mark it as crashed.
+        if (playing) playedMs += (now - lastSelectionTickMs).coerceIn(0, 1000)
+        lastSelectionTickMs = now
+        if (guardSetMs > 0 && playedMs > 10_000 && state.selectedSid >= 0) { LocalDab.clearPlayingGuard(state.selectedSid); guardSetMs = 0 }
     }
 
     private fun pullAudio() {
