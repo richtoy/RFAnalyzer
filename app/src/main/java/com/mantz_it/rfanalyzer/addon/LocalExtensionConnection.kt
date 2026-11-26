@@ -2,6 +2,8 @@ package com.mantz_it.rfanalyzer.addon
 
 import android.content.Context
 import android.util.Log
+import com.mantz_it.rfanalyzer.addon.dab.DabReceiver
+import com.mantz_it.rfanalyzer.addon.dab.LocalDab
 import com.mantz_it.rfanalyzer.addon.fm.MpxDemodulator
 import com.mantz_it.rfanalyzer.addon.rds.RdsBlockSync
 import com.mantz_it.rfanalyzer.addon.rds.RdsDemodulator
@@ -34,6 +36,8 @@ import kotlinx.coroutines.flow.asStateFlow
  *              WFM (Stereo & RDS): MpxDemodulator (stereo audio) + RdsDemodulator / RdsBlockSync /
  *              RdsGroupParser (RdsPacket groups with RdsEvents, DemodStatus once a second).
  *              Signal metrics go to [LocalDiagnostics] for the add-on's technical screens.
+ *              DAB (while [dabSelected]): the native DAB/DAB+ receiver ([DabReceiver]); its state
+ *              goes to [LocalDab] for the DAB screens.
  *
  * Push and poll are called back to back by the Demodulator for every packet, on its thread.
  *
@@ -63,6 +67,11 @@ class LocalExtensionConnection(
         private set
 
     @Volatile private var config = DigitalDemodulationConfiguration()
+    /** Set by AnalyzerService with the configuration: DAB has no DigitalDemodParams of its own. */
+    @Volatile var dabSelected = false
+
+    // --- DAB ---
+    private val dab = DabReceiver()
 
     // --- FM stereo + RDS ---
     private var mpx: MpxDemodulator? = null
@@ -88,6 +97,7 @@ class LocalExtensionConnection(
         lastBindMs = System.currentTimeMillis()
         lastSignOfLifeMs = lastBindMs
         resetDecoders()
+        LocalDab.init(context)
         _connectionState.value = ExtensionConnectionState.CONNECTED
         LocalDiagnostics.setActive(true)
         Log.i(TAG, "bind: local decoders started")
@@ -98,6 +108,7 @@ class LocalExtensionConnection(
         if (!bound) return
         bound = false
         _connectionState.value = ExtensionConnectionState.DISCONNECTED
+        dab.release()
         LocalDiagnostics.setActive(false)
         Log.i(TAG, "unbind: local decoders stopped")
     }
@@ -125,6 +136,12 @@ class LocalExtensionConnection(
     override fun pushInputSamples(inputSamples: SamplePacket): Boolean {
         if (_connectionState.value != ExtensionConnectionState.CONNECTED) return false
         lastSignOfLifeMs = System.currentTimeMillis()
+        if (dabSelected) {
+            dab.process(inputSamples.re(), inputSamples.im(), inputSamples.size(), inputSamples.sampleRate, inputSamples.frequency)
+            currentFrequency = inputSamples.frequency
+            return true
+        }
+        dab.release() // left DAB: free the receiver's threads and buffers
         return when (config.demodulationParams) {
             is DigitalDemodParams.Wfm -> { processWfm(inputSamples); true }
             else -> true
@@ -224,6 +241,15 @@ class LocalExtensionConnection(
 
     override fun pollOutputSamples(outputSamples: SamplePacket): Boolean {
         if (_connectionState.value != ExtensionConnectionState.CONNECTED) return false
+        if (dabSelected) {
+            val k = dab.pollAudio(outputSamples.re(), outputSamples.im(), outputSamples.capacity())
+            if (k <= 0) return false
+            outputSamples.setSize(k)
+            outputSamples.sampleRate = dab.outputRate
+            outputSamples.frequency = currentFrequency
+            outputSamples.timestamp = System.currentTimeMillis()
+            return true
+        }
         if (fifoCount == 0) return false
         val outL = outputSamples.re()
         val outR = outputSamples.im()

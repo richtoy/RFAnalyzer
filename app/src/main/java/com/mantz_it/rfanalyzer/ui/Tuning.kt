@@ -117,6 +117,7 @@ internal fun viewportSpanFor(mode: DemodulationMode, width: Int, currentSpan: Lo
     DemodulationMode.R09, DemodulationMode.POCSAG, DemodulationMode.NFM -> 100_000
     DemodulationMode.AM -> 50_000
     DemodulationMode.WFM, DemodulationMode.ADSB -> 2_000_000
+    DemodulationMode.DAB -> 2_048_000
     DemodulationMode.LORA -> 4L * width
     DemodulationMode.OFF -> currentSpan
 }
@@ -126,6 +127,7 @@ internal fun viewportSpanFor(mode: DemodulationMode, width: Int, currentSpan: Lo
  *  rate itself. */
 internal fun minSampleRate(mode: DemodulationMode, file: Boolean): Long = when {
     mode.basebandSamplerate < 500_000 -> 0L
+    mode == DemodulationMode.DAB -> mode.basebandSamplerate.toLong() // decoded centred: DAB's centre carrier is null
     file -> mode.basebandSamplerate.toLong()
     else -> mode.basebandSamplerate * 6L / 5
 }
@@ -211,7 +213,7 @@ internal fun computeTuning(
     val sourceFrequency = if (isReceived(viewportFrequency, span, current.sourceFrequency)) {
         current.sourceFrequency
     } else {
-        val dcOffset = if (dcSpike) minOf(2L * width, (sampleRate - span) / 2) else 0L
+        val dcOffset = if (dcSpike && mode != DemodulationMode.DAB) minOf(2L * width, (sampleRate - span) / 2) else 0L
         (viewportFrequency + dcOffset).coerceIn(limits.minFrequency, limits.maxFrequency)
     }
     return TuningPlan(sampleRate, sourceFrequency, viewportFrequency, span, channelFrequency)

@@ -65,7 +65,7 @@ fun DemodulationMode.digitalMode(stereoAndRdsEnabled: Boolean): DigitalMode? = w
     DemodulationMode.POCSAG -> DigitalMode.POCSAG
     DemodulationMode.LORA -> DigitalMode.LORA
     DemodulationMode.OFF, DemodulationMode.AM, DemodulationMode.NFM, DemodulationMode.LSB, DemodulationMode.USB,
-    DemodulationMode.CW -> null
+    DemodulationMode.CW, DemodulationMode.DAB -> null
 }
 
 /** The demodulation mode that receives [this]: Broadcast FM for RDS. */

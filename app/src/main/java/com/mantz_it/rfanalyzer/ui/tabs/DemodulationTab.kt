@@ -220,6 +220,11 @@ enum class DemodulationMode(
         fullName = "Long Range",
         description = "MeshCore, Meshtastic, LoRaWAN, LoRa-APRS",
         tuneStepOptions = listOf(1000, 10000, 100000, 200000, 500000)),
+    // Richard's fork: decoded in-process (nativedab). The 1.536 MHz ensemble at the native 2.048 Msps.
+    DAB("DAB+", 1_536_000, 1_536_000, listOf(1_536_000), 1_536_000, 1_712_000, true, 2_048_000,
+        fullName = "Digital Audio Broadcasting",
+        description = "DAB/DAB+ digital radio (Band III)",
+        tuneStepOptions = listOf(1_712_000, 16_000, 1_000)),
 }
 fun DemodulationMode.normalizeChannelWidth(width: Int): Int {
     val snappedToStep = channelWidthSteps?.minByOrNull { step ->
@@ -463,7 +468,7 @@ fun DemodulationTabComposable(
                             DemodulationMode.OFF -> 0f..0.995f
                             DemodulationMode.AM, DemodulationMode.NFM, DemodulationMode.AX25, DemodulationMode.POCSAG -> 0f..0.7f
                             DemodulationMode.WFM, DemodulationMode.LORA -> 0f..0.45f
-                            DemodulationMode.ADSB -> 0f..0.45f
+                            DemodulationMode.ADSB, DemodulationMode.DAB -> 0f..0.45f
                             DemodulationMode.LSB, DemodulationMode.USB -> 0f..0.95f
                             DemodulationMode.CW, DemodulationMode.RTTY, DemodulationMode.PSK31, DemodulationMode.R09, DemodulationMode.FT8 -> 0f..0.997f
                         },
@@ -761,6 +766,7 @@ fun DemodulationTabComposable(
                         )
                     }
                     DemodulationMode.ADSB -> { /* no extra mode-specific settings here */ }
+                    DemodulationMode.DAB -> com.mantz_it.rfanalyzer.addon.ui.DabControls()
                     else -> squelchAndBandwidth()
                 }
             }

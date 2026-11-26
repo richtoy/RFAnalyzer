@@ -887,6 +887,8 @@ class AnalyzerService : Service() {
                 }
             }
         }
+        (digitalExtensionConnection as? LocalExtensionConnection)?.dabSelected =
+            appStateRepository.demodulationMode.value == DemodulationMode.DAB
         digitalExtensionConnection?.setDigitalDemodulationConfiguration(DigitalDemodulationConfiguration(
             demodulationParams = when(appStateRepository.demodulationMode.value) {
                 DemodulationMode.WFM -> DigitalDemodParams.Wfm

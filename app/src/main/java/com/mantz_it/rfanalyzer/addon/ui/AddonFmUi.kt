@@ -57,9 +57,9 @@ import java.util.Locale
  * License: http://www.gnu.org/licenses/gpl.html GPL version 2 or higher
  */
 
-private val Good = Color(0xFF2E9D57)
-private val Warn = Color(0xFFD08A00)
-private val Bad = Color(0xFFC0392B)
+internal val Good = Color(0xFF2E9D57)
+internal val Warn = Color(0xFFD08A00)
+internal val Bad = Color(0xFFC0392B)
 
 @Composable
 fun LocalFmControls(modifier: Modifier = Modifier) {
@@ -89,12 +89,12 @@ private fun blerColor(bler: Float) = when {
 }
 
 @Composable
-private fun Dot(color: Color) {
+internal fun Dot(color: Color) {
     Box(Modifier.size(8.dp).background(color, CircleShape))
 }
 
 @Composable
-private fun Metric(label: String, value: String, modifier: Modifier = Modifier) {
+internal fun Metric(label: String, value: String, modifier: Modifier = Modifier) {
     Column(modifier.padding(end = 10.dp, bottom = 4.dp)) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
@@ -148,7 +148,7 @@ private fun pct(v: Float) = String.format(Locale.US, "%.1f %%", v * 100)
 
 /** Simple wrapping row without depending on the experimental FlowRow API. */
 @Composable
-private fun FlowRowCompat(content: @Composable () -> Unit) {
+internal fun FlowRowCompat(content: @Composable () -> Unit) {
     androidx.compose.ui.layout.Layout(content = content) { measurables, constraints ->
         val placeables = measurables.map { it.measure(constraints.copy(minWidth = 0, minHeight = 0)) }
         var x = 0; var y = 0; var rowH = 0
@@ -165,7 +165,7 @@ private fun FlowRowCompat(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun Sparkline(values: List<Float>, modifier: Modifier) {
+internal fun Sparkline(values: List<Float>, modifier: Modifier) {
     val line = MaterialTheme.colorScheme.primary
     val grid = MaterialTheme.colorScheme.outlineVariant
     Canvas(modifier) {

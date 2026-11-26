@@ -131,6 +131,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     implementation(project(":nativedsp"))
+    implementation(project(":nativedab"))
     implementation(project(":libhackrf"))
     implementation(project(":libairspy"))
     implementation(project(":libairspyhf"))

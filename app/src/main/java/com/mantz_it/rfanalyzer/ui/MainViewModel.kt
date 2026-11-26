@@ -1659,6 +1659,13 @@ class MainViewModel @Inject constructor(
     init {
         Log.d(TAG, "init: MainViewModel initializing...")
 
+        // Richard's fork: the DAB screens tune to a Band III channel through the Tuner.
+        com.mantz_it.rfanalyzer.addon.dab.LocalDab.tuner = { label, frequencyHz ->
+            tuner.tune(TuneTarget(label, DemodulationMode.DAB, frequencyHz, DemodulationMode.DAB.defaultChannelWidth)) {
+                startAnalyzerAfterTuneTo()
+            }
+        }
+
         // The Digital tab's shown mode follows the tuned digital mode (DigitalFilter): set while
         // unset and on every real mode change, so a mode picked in between lasts until the next
         // one; an analog mode keeps the last shown. previousMode/seenFirstMode tell a real change
@@ -1958,7 +1965,7 @@ class MainViewModel @Inject constructor(
                 // Avoid the DC peak by not tuning directly to the channel, but keep the whole channel
                 // inside the received signal (a wide channel's 2x offset can exceed half the sample rate).
                 val sampleRate = appStateRepository.sourceSampleRate.value
-                val dcOffset = if (!appStateRepository.sourceType.value.hasDcSpike) 0L
+                val dcOffset = if (!appStateRepository.sourceType.value.hasDcSpike || appStateRepository.demodulationMode.value == DemodulationMode.DAB) 0L
                     else minOf(2L * newChannelWidth, (sampleRate - newChannelWidth) / 2).coerceAtLeast(0)
                 val newSourceFrequency = (newChannelFrequency + dcOffset)
                     .coerceIn(appStateRepository.sourceMinimumFrequency.value, appStateRepository.sourceMaximumFrequency.value)
