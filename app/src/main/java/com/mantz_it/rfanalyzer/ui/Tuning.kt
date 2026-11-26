@@ -199,7 +199,8 @@ internal fun computeTuning(
     val viewportStart = current.viewportFrequency - current.viewportSpan / 2
     val viewportEnd = current.viewportFrequency + current.viewportSpan / 2
     val fits = signal.first >= viewportStart && signal.last <= viewportEnd &&
-        isReceived(current.viewportFrequency, current.viewportSpan, current.sourceFrequency)
+        isReceived(current.viewportFrequency, current.viewportSpan, current.sourceFrequency) &&
+        (mode != DemodulationMode.DAB || fixedSource || current.sourceFrequency == channelFrequency) // DAB: decoded centred
     if (fits && !keepChannelCentered)
         return TuningPlan(sampleRate, current.sourceFrequency, current.viewportFrequency, current.viewportSpan, channelFrequency)
 
@@ -210,7 +211,9 @@ internal fun computeTuning(
         val coerced = viewportFrequency.coerceIn(current.sourceFrequency - (sampleRate - span) / 2, current.sourceFrequency + (sampleRate - span) / 2)
         return TuningPlan(sampleRate, current.sourceFrequency, coerced, span, channelFrequency)
     }
-    val sourceFrequency = if (isReceived(viewportFrequency, span, current.sourceFrequency)) {
+    val sourceFrequency = if (mode == DemodulationMode.DAB) {
+        channelFrequency.coerceIn(limits.minFrequency, limits.maxFrequency)
+    } else if (isReceived(viewportFrequency, span, current.sourceFrequency)) {
         current.sourceFrequency
     } else {
         val dcOffset = if (dcSpike && mode != DemodulationMode.DAB) minOf(2L * width, (sampleRate - span) / 2) else 0L

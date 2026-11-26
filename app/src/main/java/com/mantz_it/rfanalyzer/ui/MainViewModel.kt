@@ -1970,7 +1970,12 @@ class MainViewModel @Inject constructor(
             }
             return
         }
-        if (newChannelFrequency in appStateRepository.sourceSignalStartFrequency.value..appStateRepository.sourceSignalEndFrequency.value) {
+        // Richard's fork: DAB is decoded centred (the 1.536 MHz ensemble needs the whole band, and its centre carrier
+        // is null, so the DC spike does no harm): the source always retunes onto the channel.
+        val dabNeedsRetune = appStateRepository.demodulationMode.value == DemodulationMode.DAB &&
+            appStateRepository.sourceType.value != SourceType.FILESOURCE &&
+            newChannelFrequency != appStateRepository.sourceFrequency.value
+        if (!dabNeedsRetune && newChannelFrequency in appStateRepository.sourceSignalStartFrequency.value..appStateRepository.sourceSignalEndFrequency.value) {
             moveViewportToChannel(newChannelFrequency, jump = askUser)
             appStateRepository.channelFrequency.set(newChannelFrequency)
             if (onSuccess != null) onSuccess()
