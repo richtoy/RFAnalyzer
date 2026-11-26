@@ -85,6 +85,7 @@ private:
     bool slideNew = false;
     RingBuffer<std::complex<float>> iqBuffer;
     std::vector<std::pair<std::string, uint32_t>> services;
+    static bool subchannelValid(const audiodata &ad);
 };
 
 std::string jsonEscape(const std::string &s);

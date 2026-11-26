@@ -201,11 +201,20 @@ bool DabBridge::selectService(const std::string &name) {
     ad.defined = false;
     dataforAudioService(radio, name, ad, 0);
     if (!ad.defined) return false;
+    // Until FIG 0/1 (subchannel organisation) has arrived, the service's subchannel can be
+    // incomplete; starting the MSC backend with it reads past its buffers (SIGSEGV). Wait.
+    if (!subchannelValid(ad)) return false;
     dabReset_msc(radio);
     set_audioChannel(radio, ad);
     audio.FlushRingBuffer();
     cbProgram(&ad, this);
     return true;
+}
+
+bool DabBridge::subchannelValid(const audiodata &ad) {
+    return ad.subchId >= 0 && ad.subchId < 64 && ad.startAddr >= 0 && ad.length > 0 &&
+           ad.startAddr + ad.length <= 864 && ad.bitRate >= 8 && ad.bitRate <= 384 &&
+           ad.protLevel >= 0 && ad.protLevel <= 7;
 }
 
 bool DabBridge::selectServiceBySid(uint32_t sid) {
@@ -234,7 +243,7 @@ bool DabBridge::describeService(uint32_t sid) {
     audiodata ad{};
     ad.defined = false;
     dataforAudioService(radio, name, ad, 0);
-    if (!ad.defined) return false;
+    if (!ad.defined || !subchannelValid(ad)) return false;
     emitProgram("info", &ad, this);
     return true;
 }

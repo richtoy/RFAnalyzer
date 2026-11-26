@@ -183,7 +183,9 @@ class DabReceiver {
         if (pendingSid < 0 && state.selectedSid < 0 && firstServiceMs > 0 && LocalDab.crashedSid < 0) {
             val remembered = LocalDab.rememberedSid(state)
             pendingSid = when {
-                remembered >= 0 && state.services.any { it.sid == remembered } -> remembered
+                // only once the receiver is synced and has read the service's subchannel (FIG 0/1, 0/2)
+                !state.sync -> -1
+                remembered >= 0 && state.services.any { it.sid == remembered && it.described } -> remembered
                 now - firstServiceMs > 4000 -> state.services.firstOrNull { it.isAudio == true }?.sid ?: -1
                 else -> -1
             }
