@@ -39,6 +39,8 @@ android {
         create("foss") {
             dimension = "distribution"
             versionNameSuffix = "-foss"
+            // Personal fork: installs next to the Play Store RF Analyzer instead of clashing with it.
+            applicationIdSuffix = ".foss"
             buildConfigField("boolean", "IS_FOSS", "true")
             buildConfigField("boolean", "DIGITAL_LAUNCHED", "false") // never shown in this build anyway
             resValue("string", "flavor_name", "FOSS")
@@ -99,6 +101,12 @@ tasks.register<Exec>("generateDocs") {
     group = "documentation"
     workingDir = file("$projectDir/../")
     commandLine("mkdocs", "build", "--clean", "--no-directory-urls", "--site-dir", "build_site")
+    // Personal fork: build without MkDocs installed (the in-app help pages are then left out).
+    onlyIf {
+        System.getenv("PATH").orEmpty().split(File.pathSeparator).any { dir ->
+            listOf("mkdocs", "mkdocs.exe").any { File(dir, it).canExecute() }
+        }
+    }
 }
 tasks.register<Copy>("copyDocsToAssets") {
     dependsOn("generateDocs")

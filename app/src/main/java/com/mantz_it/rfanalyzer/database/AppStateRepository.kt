@@ -1,5 +1,6 @@
 package com.mantz_it.rfanalyzer.database
 
+import com.mantz_it.rfanalyzer.BuildConfig
 import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.edit
@@ -496,7 +497,8 @@ class AppStateRepository @Inject constructor(
     val isBaseVersion = Setting("isBaseVersion", false, scope, dataStore)
     val license = DerivedState(isFullVersion, isBaseVersion) { licenseOfCache(isFullVersion.value, isBaseVersion.value) }
     /** Base or Full Version: no trial limits. The extensions need the Full Version (digitalFeaturesUnlocked). */
-    val isLicensed = DerivedState(isFullVersion, isBaseVersion) { isFullVersion.value || isBaseVersion.value }
+    // Personal FOSS fork: the FOSS build is always licensed - no trial limits, no usage time cap.
+    val isLicensed = DerivedState(isFullVersion, isBaseVersion) { BuildConfig.IS_FOSS || isFullVersion.value || isBaseVersion.value }
     // The running analyzer's seconds not yet added to appUsageTimeInSeconds and
     // digitalTrialUsedSeconds: AnalyzerService adds them every 30 s (each write rewrites the
     // preferences file). Everything derived counts them, so the times left count down by the second.
@@ -506,7 +508,7 @@ class AppStateRepository @Inject constructor(
         (TRIAL_VERSTION_USAGE_TIME - appUsageTimeInSeconds.value - unsavedUsageSeconds.value).coerceAtLeast(0)
     }
     val isAppUsageTimeUsedUp = DerivedState(appUsageTimeInSeconds, unsavedUsageSeconds) {
-        appUsageTimeInSeconds.value + unsavedUsageSeconds.value > TRIAL_VERSTION_USAGE_TIME
+        !BuildConfig.IS_FOSS && appUsageTimeInSeconds.value + unsavedUsageSeconds.value > TRIAL_VERSTION_USAGE_TIME
     }
 
     // Digital modes are a feature of the full version (also Base Version + upgrade). Without it
