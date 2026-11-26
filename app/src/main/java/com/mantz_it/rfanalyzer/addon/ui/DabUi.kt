@@ -418,6 +418,7 @@ private fun SignalPage(s: DabState) {
         Metric("AAC ok", "${s.quality.aacPercent} %")
         Metric("Audio rate", "${s.audioRate} Hz")
         Metric("Audio buffer", "${s.audioBufferedMs} ms")
+        Metric("Audio in/out", "${s.audioInPerSec} / ${s.audioOutPerSec} per s")
         Metric("Dropped input", "${s.droppedSamples}")
         Metric("Input rate", "%.3f Msps".format(Locale.US, s.inputRate / 1e6))
         Metric("Input level", "%.1f dBFS".format(Locale.US, s.inputLevelDb))

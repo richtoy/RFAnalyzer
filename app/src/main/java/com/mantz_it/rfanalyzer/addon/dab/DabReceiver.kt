@@ -40,6 +40,8 @@ class DabReceiver {
     private var inputPowerN = 0L
     private var gaps = 0
     private var lastPacketEndMs = 0L
+    private var audioInFrames = 0L
+    private var audioOutFrames = 0L
 
     // audio
     private val pcm = ShortArray(16_384)
@@ -147,7 +149,13 @@ class DabReceiver {
             val level = if (inputPowerN > 0) (10 * kotlin.math.log10(inputPower / inputPowerN + 1e-12)).toFloat() else -120f
             if (!state.sync) Log.d(TAG, "status: no sync, input $rateNow S/s, level %.1f dBFS, dropped ${NativeDab.nativeDroppedSamples(handle)}".format(level))
             inputCount = 0; inputPower = 0.0; inputPowerN = 0
+            val audioIn = (audioInFrames * 1000 / dt).toInt()
+            val audioOut = (audioOutFrames * 1000 / dt).toInt()
+            audioInFrames = 0; audioOutFrames = 0
+            if (state.selectedSid >= 0) Log.d(TAG, "status: audio in $audioIn/s out $audioOut/s, buffered $fifoCount frames at $audioRate Hz, playing=$playing")
             state = state.copy(
+                audioInPerSec = audioIn,
+                audioOutPerSec = audioOut,
                 inputRate = rateNow,
                 inputLevelDb = level,
                 audioRate = audioRate,
@@ -196,6 +204,7 @@ class DabReceiver {
             if (k <= 0) break
             val rate = NativeDab.nativeAudioRate(handle)
             if (rate > 0 && rate != audioRate) { audioRate = rate; clearAudio() }
+            audioInFrames += k / 2
             var i = 0
             while (i + 1 < k) {
                 if (fifoCount == FIFO_FRAMES) { fifoRead = (fifoRead + 1) % FIFO_FRAMES; fifoCount-- }
@@ -236,6 +245,7 @@ class DabReceiver {
             fifoRead = (fifoRead + 1) % FIFO_FRAMES
         }
         fifoCount -= k
+        audioOutFrames += k
         return k
     }
 }

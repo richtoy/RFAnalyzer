@@ -128,6 +128,9 @@ data class DabState(
     val inputLevelDb: Float = -120f,
     /** Packets the receiver got since the last status, and how many had a gap in time before them. */
     val inputGaps: Int = 0,
+    /** Audio frames per second arriving from the decoder, and handed to the audio output. */
+    val audioInPerSec: Int = 0,
+    val audioOutPerSec: Int = 0,
     val transmitters: List<DabTransmitter> = emptyList(),
     /** Seconds since the last retune (for "searching..." messages). */
     val secondsSinceTune: Int = 0,
