@@ -35,6 +35,7 @@ class DabReceiver {
     private var pendingSid = -1L
     private var lastSelectAttemptMs = 0L
     private var firstServiceMs = 0L
+    private var guardSetMs = 0L
     private var inputCount = 0L
     private var inputPower = 0.0
     private var inputPowerN = 0L
@@ -86,6 +87,7 @@ class DabReceiver {
         state = DabState()
         LocalDab.publish(state)
         clearAudio()
+        if (guardSetMs > 0) { LocalDab.clearPlayingGuard(); guardSetMs = 0 }
         Log.i(TAG, "native receiver released")
     }
 
@@ -177,7 +179,8 @@ class DabReceiver {
             lastSelectAttemptMs = 0
         }
         if (state.services.isNotEmpty() && firstServiceMs == 0L) firstServiceMs = now
-        if (pendingSid < 0 && state.selectedSid < 0 && firstServiceMs > 0) {
+        // After a crash while playing, nothing starts by itself (a crash loop otherwise): the user picks a station.
+        if (pendingSid < 0 && state.selectedSid < 0 && firstServiceMs > 0 && LocalDab.crashedSid < 0) {
             val remembered = LocalDab.rememberedSid(state)
             pendingSid = when {
                 remembered >= 0 && state.services.any { it.sid == remembered } -> remembered
@@ -187,6 +190,8 @@ class DabReceiver {
         }
         if (pendingSid >= 0 && pendingSid != state.selectedSid && now - lastSelectAttemptMs >= 1000) {
             lastSelectAttemptMs = now
+            LocalDab.guardPlaying(pendingSid)
+            guardSetMs = now
             if (NativeDab.nativeSelectServiceBySid(handle, pendingSid.toInt())) {
                 Log.i(TAG, "selected service %04X".format(pendingSid))
                 clearAudio()
@@ -196,6 +201,8 @@ class DabReceiver {
         } else if (pendingSid == state.selectedSid) {
             pendingSid = -1
         }
+        // 30 s of playing without a crash: the service is fine
+        if (guardSetMs > 0 && now - guardSetMs > 30_000) { LocalDab.clearPlayingGuard(); guardSetMs = 0 }
     }
 
     private fun pullAudio() {

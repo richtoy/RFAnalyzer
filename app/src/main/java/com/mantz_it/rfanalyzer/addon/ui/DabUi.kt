@@ -130,6 +130,10 @@ fun DabControls(modifier: Modifier = Modifier) {
         }
         if (scan.log.isNotEmpty() && (scan.running || scan.finished)) ScanLog(scan.log, scan.running)
         StatusRow(s)
+        if (LocalDab.crashedSid >= 0 && s.selectedSid < 0) Text(
+            "The app stopped unexpectedly last time while playing %04X, so nothing starts by itself. Tap a station to play.".format(LocalDab.crashedSid),
+            style = MaterialTheme.typography.bodySmall, color = Warn, modifier = Modifier.padding(top = 4.dp),
+        )
         Spacer(Modifier.height(6.dp))
         NowPlayingCard(s, compact = true)
         Spacer(Modifier.height(6.dp))

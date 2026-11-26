@@ -57,8 +57,17 @@ object LocalDab {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var scanJob: Job? = null
 
+    /** The service that was being started or playing when the last session ended abruptly (a crash): not auto-played again. */
+    @Volatile var crashedSid: Long = -1
+        private set
+
     fun init(context: Context) {
-        if (prefs == null) prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs == null) {
+            prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            crashedSid = prefs?.getLong("playing_guard", -1L) ?: -1L
+            if (crashedSid >= 0) Log.w(TAG, "init: the last session ended while playing %04X: no auto-play".format(crashedSid))
+            prefs?.edit()?.remove("playing_guard")?.commit()
+        }
         if (_scan.value.found.isEmpty()) _scan.value = _scan.value.copy(found = loadEnsembles())
     }
 
@@ -67,6 +76,7 @@ object LocalDab {
 
     /** Plays [sid]; remembered as this ensemble's choice. */
     fun selectService(sid: Long) {
+        crashedSid = -1 // the user's choice: auto-play is allowed again
         requestedSid = sid
         requestSerial++
         val s = _state.value
@@ -78,6 +88,10 @@ object LocalDab {
     }
 
     /** The service last chosen in the ensemble ([s]'s EId, else its channel), or -1. */
+    /** Written synchronously (commit) before the receiver starts a service, so it survives a native crash. */
+    internal fun guardPlaying(sid: Long) { prefs?.edit()?.putLong("playing_guard", sid)?.commit() }
+    internal fun clearPlayingGuard() { prefs?.edit()?.remove("playing_guard")?.apply() }
+
     internal fun rememberedSid(s: DabState): Long = prefs?.getLong(prefKey(s), -1L) ?: -1L
     private fun prefKey(s: DabState) = if (s.ensembleId >= 0) "sid_e${s.ensembleId}" else "sid_f${s.frequencyHz / 1000}"
 
