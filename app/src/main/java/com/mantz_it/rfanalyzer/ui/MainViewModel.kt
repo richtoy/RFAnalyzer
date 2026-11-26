@@ -1369,7 +1369,9 @@ class MainViewModel @Inject constructor(
             setChannelFrequency(newChannelFrequency)
         },
         onTunerWheelDelta = { delta ->
-            val minimumStepSize = appStateRepository.tuneStepHz.value
+            // A stored step the mode no longer offers (DAB's former 1.712 MHz) falls back to the mode's default, as the picker shows it.
+            val mode = appStateRepository.demodulationMode.value
+            val minimumStepSize = appStateRepository.tuneStepHz.value.takeIf { it in mode.tuneStepOptions } ?: mode.tuneStepDistance
             val absDelta = abs(delta)
             val factor = appStateRepository.viewportSampleRate.value / 1000f / minimumStepSize
             val amplification = factor * saturationFunction(x=absDelta-1, a=3f, k=5f)
