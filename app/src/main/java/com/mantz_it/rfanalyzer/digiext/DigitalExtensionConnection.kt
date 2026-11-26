@@ -70,7 +70,7 @@ class DigitalExtensionConnection(
     private val onPacket: (DigitalPacket) -> Unit,
     private val onStreamElement: (StreamElement) -> Unit,
     private val onDemodStatus: (DemodStatus) -> Unit,
-) : ServiceConnection {
+) : ServiceConnection, ExtensionLink {
 
     companion object {
         private const val TAG = "DigitalExtensionConnection"
@@ -97,6 +97,8 @@ class DigitalExtensionConnection(
          */
         fun checkPackage(context: Context): DigitalAvailability {
             if (!DigitalFeatures.inBuild) return DigitalAvailability.NOT_IN_BUILD
+            // Personal fork: the local decoders (LocalExtensionConnection) are always there.
+            if (LocalDecoders.enabled) return DigitalAvailability.READY
             val pm = context.packageManager
             if (!isDigitalExtensionPackageInstalled(context)) return DigitalAvailability.NOT_INSTALLED
             if (pm.checkSignatures(context.packageName, SERVICE_PACKAGE) != PackageManager.SIGNATURE_MATCH)
@@ -127,10 +129,10 @@ class DigitalExtensionConnection(
             }
     }
 
-    var bound = false
+    override var bound = false
         private set
     private val _connectionState = MutableStateFlow(ExtensionConnectionState.DISCONNECTED)
-    val connectionState: StateFlow<ExtensionConnectionState> = _connectionState.asStateFlow()
+    override val connectionState: StateFlow<ExtensionConnectionState> = _connectionState.asStateFlow()
     private var control: IDigitalExtensionService? = null
     private var iqSharedMemoryOutputReader: IqSharedMemoryRingReader? = null
     private var iqSharedMemoryInputWriter: IqSharedMemoryRingWriter? = null
@@ -138,10 +140,10 @@ class DigitalExtensionConnection(
 
     /** When the extension last sent anything - its PipelineHealth comes once a second while its
      *  thread runs, so silence for longer means it stopped or hangs (see AnalyzerService's watchdog). */
-    @Volatile var lastSignOfLifeMs = 0L
+    @Volatile override var lastSignOfLifeMs = 0L
         private set
     /** When the last bind was requested - the watchdog's measure for a binding that doesn't complete. */
-    @Volatile var lastBindMs = 0L
+    @Volatile override var lastBindMs = 0L
         private set
 
     // Completed by the STOPPED event unbindAndAwaitStopped() waits for.
@@ -179,7 +181,7 @@ class DigitalExtensionConnection(
         return data?.getParcelable(Event.PAYLOAD_KEY)
     }
 
-    fun canResolveDigitalExtensionService(context: Context): Boolean {
+    override fun canResolveDigitalExtensionService(context: Context): Boolean {
         val intent = Intent(SERVICE_INTENT_ACTION).apply {
             setPackage(SERVICE_PACKAGE)
         }
@@ -187,11 +189,11 @@ class DigitalExtensionConnection(
         return services.isNotEmpty()
     }
 
-    fun hasIpcPermission(context: Context): Boolean {
+    override fun hasIpcPermission(context: Context): Boolean {
         return context.packageManager.checkPermission(IPC_PERMISSION, context.packageName) == PackageManager.PERMISSION_GRANTED
     }
 
-    fun bind(): Boolean {
+    override fun bind(): Boolean {
         if (bound) {
             Log.w(TAG, "bind: Already bound! returning..")
             return false
@@ -224,7 +226,7 @@ class DigitalExtensionConnection(
         return ret
     }
 
-    fun unbind() {
+    override fun unbind() {
         if (!bound) {
             Log.w(TAG, "unbind: Not bound. return..")
             return
@@ -245,7 +247,7 @@ class DigitalExtensionConnection(
      * ends, so a [bind] meanwhile is refused with a warning instead of reusing a connection that is
      * mid-teardown.
      */
-    suspend fun unbindAndAwaitStopped(timeoutMs: Long = 5_000L) {
+    override suspend fun unbindAndAwaitStopped(timeoutMs: Long) {
         if (!bound) return
         val c = control
         if (c != null) {
@@ -270,7 +272,7 @@ class DigitalExtensionConnection(
      * completed. Doesn't wait for STOPPED - a hung extension wouldn't send it. The extension's
      * onUnbind ends its session; reconnecting starts a fresh one.
      */
-    fun dropUnresponsive() {
+    override fun dropUnresponsive() {
         Log.w(TAG, "dropUnresponsive: state=${_connectionState.value}, last sign of life ${if (lastSignOfLifeMs > 0) "${System.currentTimeMillis() - lastSignOfLifeMs} ms ago" else "never"}")
         control = null
         if (bound) safeUnbindService()
@@ -279,12 +281,12 @@ class DigitalExtensionConnection(
     }
 
     /** Called by the reconnect loop right before it starts retrying. */
-    fun markReconnecting() {
+    override fun markReconnecting() {
         _connectionState.value = ExtensionConnectionState.RECONNECTING
     }
 
     /** Called by the reconnect loop once its retry budget is exhausted. */
-    fun markUnavailable() {
+    override fun markUnavailable() {
         _connectionState.value = ExtensionConnectionState.UNAVAILABLE
     }
 
@@ -293,7 +295,7 @@ class DigitalExtensionConnection(
      * mid-retry) - clears a stale RECONNECTING/etc state so it doesn't linger in the UI. No-ops if
      * actually bound (unbind() already transitions state correctly in that case).
      */
-    fun markIdle() {
+    override fun markIdle() {
         if (!bound) _connectionState.value = ExtensionConnectionState.DISCONNECTED
     }
 
@@ -375,7 +377,7 @@ class DigitalExtensionConnection(
 
     private var lastKnownInputRingOverwriteCount = 0L
 
-    fun pushInputSamples(inputSamples: SamplePacket): Boolean {
+    override fun pushInputSamples(inputSamples: SamplePacket): Boolean {
         if (_connectionState.value != ExtensionConnectionState.CONNECTED) return false
         val writer = iqSharedMemoryInputWriter ?: return false
         writer.write(inputSamples)
@@ -390,13 +392,13 @@ class DigitalExtensionConnection(
         return true
     }
 
-    fun pollOutputSamples(outputSamples: SamplePacket): Boolean {
+    override fun pollOutputSamples(outputSamples: SamplePacket): Boolean {
         if (_connectionState.value != ExtensionConnectionState.CONNECTED) return false
         val reader = iqSharedMemoryOutputReader ?: return false
         return reader.read(outputSamples)
     }
 
-    fun setDigitalDemodulationConfiguration(configuration: DigitalDemodulationConfiguration) {
+    override fun setDigitalDemodulationConfiguration(configuration: DigitalDemodulationConfiguration) {
         digitalDemodulationConfiguration = configuration
         try {
             control?.setConfiguration(configuration)

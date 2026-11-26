@@ -1,5 +1,7 @@
 package com.mantz_it.rfanalyzer.ui.tabs
 
+import com.mantz_it.rfanalyzer.addon.ui.LocalFmControls
+import com.mantz_it.rfanalyzer.digiext.LocalDecoders
 import com.mantz_it.rfanalyzer.digiext.rds.RdsPtyTable
 import com.mantz_it.rfanalyzer.digiext.DigitalAction
 import com.mantz_it.rfanalyzer.digiext.DigitalFeatures
@@ -687,11 +689,12 @@ fun DemodulationTabComposable(
                         if (DigitalFeatures.shown) {
                             OutlinedSwitch(
                                 label = "Stereo & RDS",
-                                helpText = "If enabled, use the digital extension to demodulate stereo audio and RDS data.",
+                                helpText = if (LocalDecoders.enabled) "If enabled, the built-in decoder demodulates stereo audio and RDS data." else "If enabled, use the digital extension to demodulate stereo audio and RDS data.",
                                 isChecked = wfmStereoAndRdsEnabled,
                                 onCheckedChange = demodulationTabActions.onWfmStereoAndRdsEnabledChanged,
                                 helpSubPath = "demodulation.html#stereo-rds",
                             )
+                            if (LocalDecoders.enabled && wfmStereoAndRdsEnabled) LocalFmControls()
                             OutlinedEnumDropDown(
                                 label = "RDS Programme Types",
                                 enumClass = RdsPtyTable::class,

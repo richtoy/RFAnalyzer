@@ -523,10 +523,11 @@ class AppStateRepository @Inject constructor(
         (DIGITAL_TRIAL_SECONDS - digitalTrialUsedSeconds.value - unsavedDigitalTrialSeconds.value).coerceAtLeast(0)
     }
     val digitalFeaturesUnlocked = DerivedState(isFullVersion, digitalTrialUsedSeconds, unsavedDigitalTrialSeconds) {
-        isFullVersion.value || digitalTrialUsedSeconds.value + unsavedDigitalTrialSeconds.value < DIGITAL_TRIAL_SECONDS
+        // Personal fork: the FOSS build decodes with its own local decoders, no trial.
+        BuildConfig.IS_FOSS || isFullVersion.value || digitalTrialUsedSeconds.value + unsavedDigitalTrialSeconds.value < DIGITAL_TRIAL_SECONDS
     }
     /** Shown while it counts: no full version. */
-    val digitalTrialRunning = DerivedState(isFullVersion) { !isFullVersion.value }
+    val digitalTrialRunning = DerivedState(isFullVersion) { !BuildConfig.IS_FOSS && !isFullVersion.value }
 
     // Donation Dialog:
     val timestampOfLastDonationDialog = Setting("timestampOfLastDonationDialog", 0, scope, dataStore)

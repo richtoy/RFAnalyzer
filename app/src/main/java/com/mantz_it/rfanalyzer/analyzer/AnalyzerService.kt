@@ -46,6 +46,9 @@ import androidx.core.net.toUri
 import com.mantz_it.rfanalyzer.BuildConfig
 import com.mantz_it.rfanalyzer.database.AppStateRepository
 import com.mantz_it.rfanalyzer.digiext.DigitalExtensionConnection
+import com.mantz_it.rfanalyzer.digiext.ExtensionLink
+import com.mantz_it.rfanalyzer.digiext.LocalDecoders
+import com.mantz_it.rfanalyzer.addon.LocalExtensionConnection
 import com.mantz_it.rfanalyzer.digiext.ExtensionConnectionState
 import com.mantz_it.rfanalyzer.digiext.decodes
 import com.mantz_it.rfanalyzer.digiext.DigitalExtensionStatus
@@ -120,7 +123,7 @@ class AnalyzerService : Service() {
         private set
     /** The squelch's decision: made by the FFT, read by the Scheduler (Squelch.kt). */
     private val squelchGate = SquelchGate()
-    var digitalExtensionConnection: DigitalExtensionConnection? = null
+    var digitalExtensionConnection: ExtensionLink? = null
         private set
 
     inner class LocalBinder : Binder() {
@@ -821,7 +824,7 @@ class AnalyzerService : Service() {
         }
     }
 
-    private fun startDigitalExtensionReconnectLoop(connection: DigitalExtensionConnection) {
+    private fun startDigitalExtensionReconnectLoop(connection: ExtensionLink) {
         // Bound: a bind is pending or done (a start or Retry right after a disconnect, whose
         // DISCONNECTED reached the collector late) - reconnecting it would mark a working
         // connection RECONNECTING, and nothing would be pushed to it.
@@ -855,7 +858,13 @@ class AnalyzerService : Service() {
     private fun startAndConfigureDigitalExtensionConnection(): Boolean {
         digitalExtensionStopWasIntentional = false
         if (digitalExtensionConnection == null) {
-            val connection = DigitalExtensionConnection(
+            // Personal fork: the FOSS build runs its own in-process decoders instead of the extension.
+            val connection: ExtensionLink = if (LocalDecoders.enabled) LocalExtensionConnection(
+                this,
+                onPacket = digitalExtensionRepository::onPacket,
+                onStreamElement = digitalExtensionRepository::onStreamElement,
+                onDemodStatus = digitalExtensionRepository::onDemodStatusReceived,
+            ) else DigitalExtensionConnection(
                 this,
                 onPacket = digitalExtensionRepository::onPacket,
                 onStreamElement = digitalExtensionRepository::onStreamElement,

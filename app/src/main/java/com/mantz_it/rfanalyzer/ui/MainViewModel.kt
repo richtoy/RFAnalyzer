@@ -1,5 +1,6 @@
 package com.mantz_it.rfanalyzer.ui
 
+import com.mantz_it.rfanalyzer.digiext.LocalDecoders
 import com.mantz_it.rfanalyzer.source.RecordingFileName
 import com.mantz_it.rfanalyzer.source.KiwiSdrSource
 import com.mantz_it.rfanalyzer.location.CountrySource
@@ -1069,7 +1070,8 @@ class MainViewModel @Inject constructor(
             sendActionToUi(UiAction.OnStopClicked)
 
             // Show FOSS Donation Dialog (when the user presses Stop after a certain interval of app usage has passed):
-            if (BuildConfig.IS_FOSS) {
+            // Personal fork: no nag dialog after an hour of use.
+            if (BuildConfig.IS_FOSS && !LocalDecoders.enabled) {
                 val counter = appStateRepository.donationDialogCounter.value
                 val currentIntervalInSeconds = when (counter) {
                         0 -> 60 * 60          // 1 hour
