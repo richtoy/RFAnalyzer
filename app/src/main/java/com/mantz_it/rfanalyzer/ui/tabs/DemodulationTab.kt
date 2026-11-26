@@ -221,11 +221,11 @@ enum class DemodulationMode(
         description = "MeshCore, Meshtastic, LoRaWAN, LoRa-APRS",
         tuneStepOptions = listOf(1000, 10000, 100000, 200000, 500000)),
     // Richard's fork: decoded in-process (nativedab). The 1.536 MHz ensemble at the native 2.048 Msps.
-    // Tune step 16 kHz: the wheel snaps to multiples of the step, and every Band III centre is one of 16 kHz.
+    // The tuning wheel steps channel by channel (MainViewModel); the tune step is for the fine quick-tune only.
     DAB("DAB+", 1_536_000, 1_536_000, listOf(1_536_000), 1_536_000, 16_000, true, 2_048_000,
         fullName = "Digital Audio Broadcasting",
         description = "DAB/DAB+ digital radio (Band III)",
-        tuneStepOptions = listOf(16_000, 1_000)),
+        tuneStepOptions = listOf(1_000, 8_000, 16_000)),
 }
 fun DemodulationMode.normalizeChannelWidth(width: Int): Int {
     val snappedToStep = channelWidthSteps?.minByOrNull { step ->

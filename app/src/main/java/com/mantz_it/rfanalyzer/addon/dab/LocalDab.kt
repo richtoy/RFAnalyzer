@@ -89,29 +89,36 @@ object LocalDab {
         val channels = DabChannels.scanList
         scanJob = scope.launch {
             val found = ArrayList<DabEnsembleEntry>()
+            val log = ArrayList<String>()
+            val previous = _scan.value.found
+            fun note(line: String) { log += line; Log.i(TAG, "scan: $line"); _scan.value = _scan.value.copy(log = log.toList()) }
             _scan.value = DabScanState(running = true, channelCount = channels.size, found = emptyList())
             for ((i, ch) in channels.withIndex()) {
                 _scan.value = _scan.value.copy(channelIndex = i, currentChannel = ch.name)
                 tuneToChannel(ch)
-                // wait for the receiver to be on the channel
+                // wait for the receiver to be on the channel (a fresh state: syncSeen false)
                 var waited = 0
-                while (waited < 3000 && _state.value.frequencyHz != ch.frequencyHz) { delay(100); waited += 100 }
-                if (_state.value.frequencyHz != ch.frequencyHz) continue // analyzer not running?
-                // time sync within ~2.5 s, else nothing here
+                while (waited < 4000 && (_state.value.frequencyHz != ch.frequencyHz || _state.value.secondsSinceTune > 1)) { delay(100); waited += 100 }
+                if (_state.value.frequencyHz != ch.frequencyHz) { note("${ch.name}: not tuned (is the analyzer running?)"); continue }
+                // time sync within a few seconds, else nothing here
                 waited = 0
-                while (waited < 2500 && !_state.value.sync) { delay(100); waited += 100 }
-                if (!_state.value.sync) continue
+                while (waited < 4000 && !_state.value.syncSeen) { delay(100); waited += 100 }
+                if (!_state.value.syncSeen) { note("${ch.name}: no signal"); continue }
                 // the ensemble label and the service list (FIG 1) take a few seconds
                 waited = 0
-                while (waited < 8000 && (_state.value.ensembleLabel.isEmpty() || _state.value.services.isEmpty())) { delay(200); waited += 200 }
-                if (_state.value.ensembleLabel.isEmpty() && _state.value.services.isEmpty()) continue
+                while (waited < 10_000 && (_state.value.ensembleLabel.isEmpty() || _state.value.services.isEmpty())) { delay(200); waited += 200 }
+                if (_state.value.ensembleLabel.isEmpty() && _state.value.services.isEmpty()) {
+                    note("${ch.name}: DAB signal but no ensemble info (SNR ${_state.value.snrDb} dB, FIC ${_state.value.quality.ficPercent}%)")
+                    continue
+                }
                 delay(2500) // collect the rest of the services
                 val s = _state.value
                 found += DabEnsembleEntry(ch.name, ch.frequencyHz, s.ensembleLabel.ifEmpty { "(unnamed)" }, s.ensembleId,
                     s.services.map { it.label })
+                note("${ch.name}: ${s.ensembleLabel.ifEmpty { "(unnamed)" }}, ${s.services.size} services (SNR ${s.snrDb} dB)")
                 _scan.value = _scan.value.copy(found = found.toList())
             }
-            _scan.value = _scan.value.copy(running = false, found = found.toList().ifEmpty { _scan.value.found })
+            _scan.value = _scan.value.copy(running = false, finished = true, found = found.toList().ifEmpty { previous })
             if (found.isNotEmpty()) {
                 saveEnsembles(found)
                 DabChannels.byName(found.first().channel)?.let { tuneToChannel(it) }

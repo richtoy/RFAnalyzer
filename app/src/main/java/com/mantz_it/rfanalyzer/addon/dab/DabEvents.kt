@@ -30,8 +30,8 @@ object DabEvents {
         fun str(k: String) = (o[k] as? String) ?: ""
         fun bool(k: String) = o[k] as? Boolean ?: false
         return when (o["t"]) {
-            "sync" -> s.copy(sync = bool("v"))
-            "sys" -> s.copy(sync = bool("sync"), snrDb = int("snr"), frequencyOffsetHz = int("off"))
+            "sync" -> s.copy(sync = bool("v"), syncSeen = s.syncSeen || bool("v"))
+            "sys" -> s.copy(sync = bool("sync"), syncSeen = s.syncSeen || bool("sync"), snrDb = int("snr"), frequencyOffsetHz = int("off"))
             "fic" -> s.copy(quality = s.quality.copy(ficPercent = int("q").coerceIn(0, 100)))
             "ens" -> s.copy(ensembleLabel = str("name").trim(), ensembleId = long("id") and 0xFFFFFFFFL)
             "svc" -> {

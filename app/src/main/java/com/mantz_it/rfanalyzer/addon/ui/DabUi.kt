@@ -128,6 +128,7 @@ fun DabControls(modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
             )
         }
+        if (scan.log.isNotEmpty() && (scan.running || scan.finished)) ScanLog(scan.log, scan.running)
         StatusRow(s)
         Spacer(Modifier.height(6.dp))
         NowPlayingCard(s, compact = true)
@@ -135,6 +136,21 @@ fun DabControls(modifier: Modifier = Modifier) {
         ServiceList(s)
     }
     if (showDetails) DabDetailsDialog(onDismiss = { showDetails = false })
+}
+
+@Composable
+private fun ScanLog(log: List<String>, running: Boolean) {
+    var expanded by remember { mutableStateOf(false) }
+    val hits = log.filter { !it.endsWith("no signal") }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }) {
+        Text(
+            if (running) "Scan results so far (tap for all channels)" else "Last scan: ${hits.size} of ${log.size} channels with a signal (tap for all)",
+            style = MaterialTheme.typography.labelMedium,
+        )
+        (if (expanded) log else hits.takeLast(6)).forEach {
+            Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        }
+    }
 }
 
 @Composable

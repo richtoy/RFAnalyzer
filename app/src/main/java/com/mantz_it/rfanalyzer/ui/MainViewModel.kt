@@ -1368,7 +1368,22 @@ class MainViewModel @Inject constructor(
         onChannelFrequencyChanged = { newChannelFrequency ->
             setChannelFrequency(newChannelFrequency)
         },
-        onTunerWheelDelta = { delta ->
+        onTunerWheelDelta = wheel@{ delta ->
+            // Richard's fork: in DAB mode the wheel steps through the Band III channels (they aren't evenly spaced).
+            if (appStateRepository.demodulationMode.value == DemodulationMode.DAB) {
+                val channels = com.mantz_it.rfanalyzer.addon.dab.DabChannels.bandIII
+                val current = appStateRepository.channelFrequency.value
+                val nearest = channels.indices.minBy { abs(channels[it].frequencyHz - current) }
+                val dir = (if (delta > 0) 1 else -1) * (if (appStateRepository.reverseTuningWheel.value) -1 else 1)
+                val target = when {
+                    abs(channels[nearest].frequencyHz - current) > 20_000 ->   // between channels: go to the next one in that direction
+                        if (dir > 0) channels.indexOfFirst { it.frequencyHz > current }.takeIf { it >= 0 } ?: channels.lastIndex
+                        else channels.indexOfLast { it.frequencyHz < current }.takeIf { it >= 0 } ?: 0
+                    else -> (nearest + dir).coerceIn(0, channels.lastIndex)
+                }
+                setChannelFrequency(channels[target].frequencyHz, askUser = false, onErrorMessage = { })
+                return@wheel
+            }
             // A stored step the mode no longer offers (DAB's former 1.712 MHz) falls back to the mode's default, as the picker shows it.
             val mode = appStateRepository.demodulationMode.value
             val minimumStepSize = appStateRepository.tuneStepHz.value.takeIf { it in mode.tuneStepOptions } ?: mode.tuneStepDistance

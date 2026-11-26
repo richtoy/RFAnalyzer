@@ -101,6 +101,8 @@ data class DabState(
     val active: Boolean = false,
     val frequencyHz: Long = 0,
     val sync: Boolean = false,
+    /** Time sync was reached at least once since the last retune (sync itself can flicker on a weak signal). */
+    val syncSeen: Boolean = false,
     val snrDb: Int = 0,
     val frequencyOffsetHz: Int = 0,
     val quality: DabQuality = DabQuality(),
@@ -142,6 +144,9 @@ data class DabScanState(
     val channelCount: Int = 0,
     val currentChannel: String = "",
     val found: List<DabEnsembleEntry> = emptyList(),
+    /** What the scan saw on each channel, newest last ("11C: no signal", "12B: NPO, 8 services"). */
+    val log: List<String> = emptyList(),
+    val finished: Boolean = false,
 )
 
 object DabNames {
