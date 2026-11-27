@@ -1,13 +1,24 @@
 //! What the DAB receiver knows about the ensemble (port of the Android fork's DabModel/DabEvents).
+//!
+//! The native decoder (C++, see `ffi.rs`) reports everything as one-line JSON events such as
+//! `{"t":"svc","sid":33281,"name":"NPO Radio 1"}`. [`DabState::apply_event`] folds each event
+//! into a plain Rust struct that the UI can clone and draw. Terminology:
+//! * *Ensemble*: one DAB multiplex on one channel (e.g. 12C "NPO"), with a 16-bit id.
+//! * *Service*: a station inside it, identified by its SId.
+//! * *Subchannel*: the slice of the multiplex carrying a service's audio, given as a start and
+//!   length in Capacity Units (CU, 864 per ensemble), plus bitrate and protection level.
 
 use serde::{Deserialize, Serialize};
 
+/// A Band III channel name and its centre frequency in Hz.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DabChannel {
     pub name: &'static str,
     pub freq: u64,
 }
 
+/// All Band III channels (ETSI EN 300 401 table), in frequency order. Built at compile time:
+/// the block expression with a local `const fn` keeps the table readable.
 pub const BAND_III: [DabChannel; 41] = {
     const fn c(name: &'static str, khz: u64) -> DabChannel {
         DabChannel { name, freq: khz * 1000 }
@@ -29,6 +40,7 @@ pub fn channel_by_name(name: &str) -> Option<DabChannel> {
     BAND_III.iter().copied().find(|c| c.name.eq_ignore_ascii_case(name))
 }
 
+/// Nearest channel to `f`, if within 20 kHz.
 pub fn channel_for_freq(f: u64) -> Option<DabChannel> {
     BAND_III.iter().copied().min_by_key(|c| c.freq.abs_diff(f)).filter(|c| c.freq.abs_diff(f) <= 20_000)
 }
@@ -38,6 +50,8 @@ pub fn scan_list() -> Vec<DabChannel> {
     BAND_III.iter().copied().filter(|c| !c.name.ends_with('N')).collect()
 }
 
+/// One service. Starts with only SId + label (from the "svc" event); the subchannel fields
+/// are filled when an "info"/"prog" event describes it. -1 means "not known yet".
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DabService {
     pub sid: u32,
@@ -45,12 +59,16 @@ pub struct DabService {
     pub short_label: String,
     /// None: not known yet
     pub is_audio: Option<bool>,
+    /// Subchannel id, and its position/size in the multiplex in CUs (for the CU map).
     pub subch: i32,
     pub start_cu: i32,
     pub length_cu: i32,
+    /// kbit/s
     pub bitrate: i32,
+    /// Short form = UEP (unequal protection, old DAB), long form = EEP (equal protection).
     pub short_form: bool,
     pub prot_level: i32,
+    /// Audio Service Component Type: 0 = MP2 (DAB), 63 = HE-AAC (DAB+).
     pub ascty: i32,
     pub pty: i32,
     pub language: i32,
@@ -79,6 +97,7 @@ impl DabService {
             _ => "",
         }
     }
+    /// Protection as printed on receivers: UEP-n, or EEP-1A..4A / 1B..4B (levels 0-3 = A, 4-7 = B).
     pub fn protection(&self) -> String {
         if self.subch < 0 {
             "-".into()
@@ -94,6 +113,7 @@ impl DabService {
     }
 }
 
+/// A transmitter identified by TII (Transmitter Identification Information) codes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DabTransmitter {
     pub main_id: i32,
@@ -102,6 +122,7 @@ pub struct DabTransmitter {
     pub last_seen: f64,
 }
 
+/// Decoder quality percentages: FIC CRC pass rate, frame sync, Reed-Solomon, AAC decode.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DabQuality {
     pub fic: i32,
@@ -110,10 +131,13 @@ pub struct DabQuality {
     pub aac: i32,
 }
 
+/// Everything known about the current ensemble. Owned by `DabReceiver` on the engine thread
+/// and cloned into `Status` when `state_serial` changes.
 #[derive(Clone, Debug, Default)]
 pub struct DabState {
     pub active: bool,
     pub frequency: u64,
+    /// OFDM sync right now / at any time since tuning (the scan latches on `sync_seen`).
     pub sync: bool,
     pub sync_seen: bool,
     pub snr: i32,
@@ -122,14 +146,18 @@ pub struct DabState {
     pub ensemble_label: String,
     pub ensemble_id: i64,
     pub time_utc: String,
+    /// Services in order of discovery; looked up by SId with a linear search (tens of items).
     pub services: Vec<DabService>,
     pub selected_sid: Option<u32>,
     pub playing: Option<DabService>,
+    /// Dynamic Label (scrolling text) and the 30 most recent distinct labels.
     pub dls: String,
     pub dls_history: Vec<String>,
+    /// Slideshow image bytes (JPEG/PNG). Arc so cloning the state doesn't copy the image.
     pub slide: Option<std::sync::Arc<Vec<u8>>>,
     pub slide_name: String,
     pub slide_type: i32,
+    /// Bumped per new slide so the UI knows to re-decode the texture.
     pub slide_serial: u32,
     pub audio_rate: i32,
     pub audio_buffered_ms: i32,
@@ -138,9 +166,11 @@ pub struct DabState {
     pub input_level_db: f32,
     pub audio_in_per_sec: i32,
     pub audio_out_per_sec: i32,
+    /// Strongest first, max 12, entries older than 60 s dropped.
     pub transmitters: Vec<DabTransmitter>,
     pub seconds_since_tune: f32,
     pub snr_history: Vec<f32>,
+    /// Recent demodulated carrier points (I, Q) for the constellation plot.
     pub constellation: Vec<[f32; 2]>,
 }
 
@@ -154,6 +184,8 @@ impl DabState {
     pub fn ensemble_id_hex(&self) -> String {
         if self.ensemble_id < 0 { "-".into() } else { format!("{:04X}", self.ensemble_id & 0xFFFF) }
     }
+    /// Total CUs in use. Several services can share one subchannel, so count each subchannel
+    /// once: `seen.insert` returns false for a repeat, which the filter then skips.
     pub fn used_cu(&self) -> i32 {
         let mut seen = std::collections::HashSet::new();
         self.services.iter().filter(|s| s.subch >= 0 && seen.insert(s.subch)).map(|s| s.length_cu).sum()
@@ -161,6 +193,8 @@ impl DabState {
 
     /// Applies one JSON event line from the native receiver.
     pub fn apply_event(&mut self, line: &str, now: f64) {
+        // Parse into a generic JSON tree and read fields through three small closures that
+        // default to 0 / "" / false when a key is missing, so a partial event never panics.
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return };
         let int = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -187,6 +221,8 @@ impl DabState {
                     self.services.push(DabService::new(sid, s("name")));
                 }
             }
+            // "info" describes a service; "prog" means it has also been started (now playing).
+            // `t @` binds the matched string so the two cases can share this code.
             t @ ("info" | "prog") => {
                 let sid = (int("sid") & 0xFFFF_FFFF) as u32;
                 let d = DabService {
@@ -204,6 +240,7 @@ impl DabState {
                     pty: int("pty") as i32,
                     language: int("lang") as i32,
                 };
+                // replace the existing entry in place (keeping its label if the event has none)
                 if let Some(old) = self.services.iter_mut().find(|x| x.sid == sid) {
                     let label = if d.label.is_empty() { old.label.clone() } else { d.label.clone() };
                     *old = DabService { label, ..d.clone() };
@@ -247,6 +284,8 @@ impl DabState {
                     strength: v.get("strength").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
                     last_seen: now,
                 };
+                // drop this transmitter's old entry and anything stale, add the new reading,
+                // sort strongest first (partial_cmp because f32 has NaN), keep the top 12
                 self.transmitters.retain(|t| !(t.main_id == tx.main_id && t.sub_id == tx.sub_id) && now - t.last_seen < 60.0);
                 self.transmitters.push(tx);
                 self.transmitters.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
@@ -267,6 +306,7 @@ pub struct SavedEnsemble {
     pub services: Vec<String>,
 }
 
+/// Progress of a Band III scan, for the UI. `index` of `count` channels done.
 #[derive(Clone, Debug, Default)]
 pub struct DabScanState {
     pub running: bool,

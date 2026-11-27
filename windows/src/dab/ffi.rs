@@ -1,4 +1,13 @@
 //! FFI to the native DAB receiver (native/dab_capi.cpp over nativedab's DabBridge).
+//!
+//! The C side exposes an opaque handle (`void*`) and plain functions. [`Native`] owns that
+//! handle and wraps each call in a safe method:
+//! * Buffers we pass in (`push`, `poll_audio`, `poll_constellation`) are Rust slices; their
+//!   pointer and length go to C, which only touches them during the call.
+//! * Buffers C allocates (`poll_events`, `take_slide`) are copied into Rust-owned values and
+//!   then released with `rfa_dab_free`, so no C memory outlives the call.
+//! * Without the `dab` cargo feature a stub with the same methods is compiled instead, and
+//!   `create()` returns None.
 
 use crate::dsp::C32;
 
@@ -24,10 +33,13 @@ mod sys {
 }
 
 pub struct Native {
+    /// Opaque pointer to the C++ DabBridge, from rfa_dab_create; destroyed in Drop.
     #[cfg(feature = "dab")]
     h: *mut std::ffi::c_void,
 }
 
+// Raw pointers aren't Send by default. The handle is only ever used from the engine thread
+// (moved there once), and the C++ side does its own locking, so moving it is safe.
 unsafe impl Send for Native {}
 
 #[cfg(feature = "dab")]
@@ -42,6 +54,8 @@ impl Native {
     pub fn stop(&self) {
         unsafe { sys::rfa_dab_stop(self.h) }
     }
+    /// Complex32 is two f32s (re, im) laid out contiguously, so a &[C32] can be passed as an
+    /// interleaved float array of 2·n values without copying.
     pub fn push(&self, s: &[C32]) -> i32 {
         unsafe { sys::rfa_dab_push(self.h, s.as_ptr() as *const f32, s.len() as i32) }
     }
@@ -51,6 +65,7 @@ impl Native {
     pub fn describe(&self, sid: u32) -> bool {
         unsafe { sys::rfa_dab_describe(self.h, sid) != 0 }
     }
+    /// All events since the last poll as newline-separated JSON, or None.
     pub fn poll_events(&self) -> Option<String> {
         unsafe {
             let p = sys::rfa_dab_poll_events(self.h);
@@ -62,12 +77,15 @@ impl Native {
             Some(s)
         }
     }
+    /// Fills `out` with interleaved stereo PCM; returns the number of i16 values written.
     pub fn poll_audio(&self, out: &mut [i16]) -> usize {
         unsafe { sys::rfa_dab_poll_audio(self.h, out.as_mut_ptr(), out.len() as i32).max(0) as usize }
     }
     pub fn audio_rate(&self) -> i32 {
         unsafe { sys::rfa_dab_audio_rate(self.h) }
     }
+    /// A new slideshow image (bytes, file name, MOT content type) if one has arrived.
+    /// C fills `data`/`size` with a malloc'd buffer and writes the name into our 256-byte array.
     pub fn take_slide(&self) -> Option<(Vec<u8>, String, i32)> {
         unsafe {
             let mut data: *mut u8 = std::ptr::null_mut();
@@ -83,6 +101,7 @@ impl Native {
             Some((v, n, typ))
         }
     }
+    /// Up to `max` recent constellation points; C writes them as x0,y0,x1,y1,... into `buf`.
     pub fn poll_constellation(&self, max: usize) -> Vec<[f32; 2]> {
         let mut buf = vec![0f32; max * 2];
         let k = unsafe { sys::rfa_dab_poll_constellation(self.h, buf.as_mut_ptr(), max as i32) }.max(0) as usize;

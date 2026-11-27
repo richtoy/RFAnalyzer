@@ -11,37 +11,65 @@ use std::time::Instant;
 pub const INPUT_RATE: u32 = 2_048_000;
 const PREBUFFER_MS: usize = 300;
 
+/// Engine-side wrapper around the native decoder. All times are seconds since `start`.
+///
+/// Audio pacing: the native decoder produces audio in bursts (one superframe = 120 ms at a
+/// time) and on its own threads. To play smoothly at the rate the radio actually delivers,
+/// decoded audio goes into `fifo`, and each IQ block "earns" `owed` output frames in
+/// proportion to its length (2.048 M input samples = 48 000 audio frames). Only owed frames
+/// are released, so the audio clock follows the SDR clock.
 pub struct DabReceiver {
+    /// The C++ receiver; None until the first samples arrive, or after `release`.
     native: Option<Native>,
+    /// Ensemble state built from the decoder's events (see model.rs).
     pub state: DabState,
     start: Instant,
     tune_time: f64,
+    /// Times of the last 0.5 s statistics update and the last "describe" requests.
     last_status: f64,
     last_describe: f64,
+    /// Service to start, retried once a second until the decoder accepts it.
     pending_sid: Option<u32>,
     last_select_attempt: f64,
+    /// When the first service appeared (0 = none yet); auto-select waits 4 s after it.
     first_service: f64,
+    /// Ensemble key ("e<id>" or "f<kHz>") → last service chosen there. Shared with the UI
+    /// via Status so it ends up in settings.
     pub remembered: HashMap<String, u32>,
+    /// Crash guard: the SId that was playing when the app last died. Never auto-played.
     pub suspect: Option<u32>,
+    /// Whether the guard file currently names the playing service.
     guard_set: bool,
+    /// Milliseconds of audio played since selection; the guard is cleared after 10 s.
     played_ms: f64,
     last_tick: f64,
+    /// Input statistics for the current 0.5 s period (sample count, power sum over every
+    /// 16th sample, and how many samples that sum covers).
     input_count: u64,
     input_power: f64,
     input_power_n: u64,
     audio_in_frames: u64,
     audio_out_frames: u64,
+    /// Scratch buffer for interleaved 16-bit PCM pulled from the decoder.
     pcm: Vec<i16>,
+    /// Decoded audio at 48 kHz waiting to be released (max 2 s).
     fifo: VecDeque<[f32; 2]>,
+    /// False while prebuffering (needs 300 ms in `fifo` before output starts).
     playing: bool,
+    /// The decoder's output rate (32/48 kHz for DAB+, 48 kHz for MP2 mostly).
     audio_rate: i32,
+    /// Output frames earned by input samples but not yet released.
     owed: f64,
+    /// Linear resampler state for non-48 kHz services.
     resample_pos: f64,
     resample_prev: [f32; 2],
     pub error: Option<String>,
+    /// Incremented on every change to `state`; the engine copies the state only when it moves.
     pub state_serial: u64,
 }
 
+/// %APPDATA%\RFAnalyzer\dab_playing_guard.txt: holds the SId being played until it has played
+/// for 10 s. If the app crashes during that time, the file survives and names the culprit.
 pub fn guard_path() -> Option<std::path::PathBuf> {
     let dir = crate::config_dir()?;
     Some(dir.join("dab_playing_guard.txt"))
@@ -145,6 +173,7 @@ impl DabReceiver {
         }
     }
 
+    /// Key for `remembered`: the ensemble id once known, else the frequency in kHz.
     fn remember_key(&self) -> String {
         if self.state.ensemble_id >= 0 { format!("e{}", self.state.ensemble_id) } else { format!("f{}", self.state.frequency / 1000) }
     }
@@ -178,6 +207,7 @@ impl DabReceiver {
             self.state.frequency = freq;
         }
 
+        // input level estimate from every 16th sample (cheap and plenty accurate)
         self.input_count += samples.len() as u64;
         let mut p = 0.0f64;
         for s in samples.iter().step_by(16) {
@@ -188,6 +218,7 @@ impl DabReceiver {
         let native = self.native.as_ref().unwrap();
         native.push(samples);
 
+        // events arrive as a block of JSON lines; apply each to the state
         if let Some(ev) = native.poll_events() {
             for line in ev.lines() {
                 if !line.trim().is_empty() {
@@ -206,11 +237,13 @@ impl DabReceiver {
 
         self.handle_selection(now);
         self.pull_audio();
+        // this block earns len · 48000/2048000 output frames (capped at 1 s of credit)
         self.owed = (self.owed + samples.len() as f64 * 48_000.0 / INPUT_RATE as f64).min(48_000.0);
         self.paced_output(out);
 
         if now - self.last_status >= 0.5 {
             let native = self.native.as_ref().unwrap();
+            // ask the decoder for details (subchannel, bitrate...) of services that lack them
             if now - self.last_describe >= 1.0 {
                 self.last_describe = now;
                 for s in self.state.services.iter().filter(|s| !s.described()) {
@@ -248,12 +281,18 @@ impl DabReceiver {
         }
     }
 
+    /// Chooses what to play and starts it.
+    /// Auto-select (nothing chosen yet, sync present): the remembered service for this
+    /// ensemble if it is known and described, otherwise, 4 s after the first service showed
+    /// up, the first audio service. Never the crash suspect.
     fn handle_selection(&mut self, now: f64) {
         if !self.state.services.is_empty() && self.first_service == 0.0 {
             self.first_service = now;
         }
         if self.pending_sid.is_none() && self.state.selected_sid.is_none() && self.first_service > 0.0 && self.state.sync {
             let remembered = self.remembered.get(&self.remember_key()).copied();
+            // `ok` takes `self` as a parameter (not captured) so it can be called while
+            // `self.pending_sid` is being assigned
             let ok = |sid: u32, s: &Self| s.suspect != Some(sid) && s.state.services.iter().any(|x| x.sid == sid && x.described());
             self.pending_sid = match remembered {
                 Some(r) if ok(r, self) => Some(r),
@@ -266,6 +305,8 @@ impl DabReceiver {
         if let Some(sid) = self.pending_sid {
             if Some(sid) != self.state.selected_sid && now - self.last_select_attempt >= 1.0 {
                 self.last_select_attempt = now;
+                // write the guard *before* starting playback, so a crash inside the decoder
+                // leaves it behind
                 self.set_guard(sid);
                 self.played_ms = 0.0;
                 if self.native.as_ref().map(|n| n.select(sid)).unwrap_or(false) {
@@ -289,6 +330,8 @@ impl DabReceiver {
         }
     }
 
+    /// Moves all decoded PCM from the decoder into `fifo`, converting i16 → f32 and
+    /// resampling to 48 kHz if needed. `pcm` is interleaved L,R,L,R; `k` is the sample count.
     fn pull_audio(&mut self) {
         let Some(native) = self.native.as_ref() else { return };
         loop {
@@ -309,7 +352,8 @@ impl DabReceiver {
                 if self.audio_rate == 48_000 {
                     self.fifo.push_back(cur);
                 } else {
-                    // linear resampling to 48 kHz
+                    // linear resampling to 48 kHz: emit outputs at positions resample_pos
+                    // (0..1 between prev and cur), stepping by in_rate/48000
                     while self.resample_pos < 1.0 {
                         let mu = self.resample_pos as f32;
                         self.fifo.push_back([
@@ -325,12 +369,15 @@ impl DabReceiver {
             while self.fifo.len() > 96_000 {
                 self.fifo.pop_front();
             }
+            // a partly filled buffer means the decoder is drained for now
             if k < self.pcm.len() {
                 break;
             }
         }
     }
 
+    /// Releases the owed number of frames from `fifo`, nudged ±2 % when the fifo drifts far
+    /// from the 300 ms target, so long-term clock differences don't empty or overfill it.
     fn paced_output(&mut self, out: &mut Vec<[f32; 2]>) {
         let target = 48_000 * PREBUFFER_MS / 1000;
         if !self.playing {

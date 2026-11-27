@@ -1,17 +1,30 @@
 //! FFT spectrum with windowing and averaging, in dBFS.
+//!
+//! Used for the main spectrum/waterfall. Each call takes the newest `size` IQ samples,
+//! multiplies them by a Blackman-Harris window, runs an in-place FFT and converts each bin to
+//! dB. The result is reordered ("FFT shift") so index 0 is the lowest frequency
+//! (centre − rate/2) and index size/2 is the tuned centre frequency.
 
 use super::C32;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
 pub struct SpectrumProcessor {
+    /// FFT length (number of bins).
     pub size: usize,
+    /// Planned FFT (rustfft picks the algorithm for this size once).
     fft: Arc<dyn Fft<f32>>,
+    /// Window coefficients, scaled to sum 1 so a full-scale tone reads 0 dBFS.
     window: Vec<f32>,
+    /// Work buffer: windowed input, transformed in place into bins (natural FFT order).
     buf: Vec<C32>,
+    /// Scratch space rustfft needs for in-place transforms.
     scratch: Vec<C32>,
+    /// Output in dB, FFT-shifted, exponentially averaged across calls.
     avg: Vec<f32>,
+    /// Averaging length: each new frame contributes 1/averaging of the result.
     pub averaging: usize,
+    /// False until the first frame, which initialises `avg` directly.
     have_avg: bool,
 }
 
@@ -36,6 +49,7 @@ impl SpectrumProcessor {
     /// Computes the spectrum of the last `size` samples; output is FFT-shifted (lowest frequency first), in dB.
     pub fn compute(&mut self, samples: &[C32]) -> &[f32] {
         let n = self.size;
+        // take the newest n samples (or fewer, zero-padded) and apply the window
         let start = samples.len().saturating_sub(n);
         let s = &samples[start..];
         for i in 0..n {
@@ -44,11 +58,14 @@ impl SpectrumProcessor {
         self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
         let alpha = 1.0 / self.averaging as f32;
         for i in 0..n {
+            // FFT shift: output i comes from bin j. Bins n/2..n are the negative frequencies,
+            // so they go first. norm_sqr = re²+im² is power; clamp avoids log10(0).
             let j = (i + n / 2) % n;
             let p = self.buf[j].norm_sqr().max(1e-20);
             let db = 10.0 * p.log10();
             if self.have_avg && self.averaging > 1 {
-                // average in the power domain
+                // average in the power domain (averaging dB values would bias noise low):
+                // convert back to power, move 1/averaging of the way to the new value, back to dB
                 let old = 10f32.powf(self.avg[i] / 10.0);
                 self.avg[i] = 10.0 * (old + alpha * (p - old)).max(1e-20).log10();
             } else {

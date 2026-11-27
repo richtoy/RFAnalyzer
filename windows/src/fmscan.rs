@@ -1,24 +1,55 @@
 //! FM band scan: a quick spectrum survey of the band finds the carriers, then each one is tuned in
 //! WFM to check stereo and collect its RDS (PI, PS, PTY, TP/TA, ECC/country, AF, RT...). The
 //! results become the FM presets list.
+//!
+//! How it runs: the scan is a state machine ([`FmScanPhase`]) stored in `RfaApp::fm_scan`. It
+//! has no thread of its own. The UI loop calls [`RfaApp::fm_scan_step`] every frame, and
+//! [`RfaApp::fm_scan_frames`] with every batch of spectrum frames from the engine. Each step
+//! looks at the time and the latest engine status (pilot, RDS) and decides whether to wait,
+//! retune, or record a result. Retuning goes through the normal settings path, so the scan
+//! drives the radio exactly as a user would.
+//!
+//! 1. **Survey**: the band (87.5–108 MHz) is wider than the SDR's bandwidth, so the source is
+//!    stepped through overlapping windows (`centers`). In each window the spectrum gives a
+//!    level for every grid channel (100 kHz steps) in the usable part of the frame; the
+//!    loudest reading per channel is kept in `levels`.
+//! 2. **Candidates**: channels that are a local maximum and `threshold_db` above the noise
+//!    floor (the 20th-percentile level).
+//! 3. **Verify**: each candidate is tuned in WFM for a few seconds while [`Track`] watches PS
+//!    and RadioText settle and the pilot detector reports stereo. The result is an
+//!    [`FmPreset`]. Strong carriers with no RDS also get their ±1 step neighbours tried, since
+//!    the survey's peak can be one channel off.
+//! 4. **Finish**: duplicates of a PI are marked (`mark_same_pi`), user-given names are carried
+//!    over from the old list, and the list replaces `settings.fm_presets` (saved to disk).
+//!
+//! Every step is also written to %APPDATA%\RFAnalyzer\fm_scan_log.txt for diagnosis.
 
 use crate::app::RfaApp;
 use crate::settings::{Mode, SourceKind};
 use serde::{Deserialize, Serialize};
 
 /// One station found by the scan (or kept from an earlier one).
+///
+/// Stored in settings.json and in the JSON export. `#[serde(default)]` means any field
+/// missing from an older file gets its Default value, so new fields never break loading.
+/// The RDS fields are a snapshot of [`crate::rds::RdsStation`] at the end of the check.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FmPreset {
+    /// Hz; presets are identified by frequency (e.g. when keeping user names).
     pub freq: u64,
     /// user's own name; empty means "use the PS"
     pub name: String,
+    /// Mean channel power while tuned (dBFS) and survey level above the noise floor.
     pub level_db: f32,
     pub snr_db: f32,
+    /// Pilot locked on ≥ 3 polls; pilot level in dB at the end of the check.
     pub stereo: bool,
     pub pilot_db: f32,
+    /// True only if a PI code was decoded (block sync alone can happen on noise).
     pub rds: bool,
     pub pi: Option<u16>,
+    /// Stable PS (see [`Track::name`]), possibly pages of a scrolling PS joined by spaces.
     pub ps: String,
     pub long_ps: Option<String>,
     pub pty: Option<u8>,
@@ -27,24 +58,32 @@ pub struct FmPreset {
     pub ta: bool,
     pub music: bool,
     pub ecc: Option<u8>,
+    /// From ECC + PI, or a guess from the PI alone ending in "?".
     pub country: Option<String>,
+    /// Alternative frequencies, MHz.
     pub af: Vec<f64>,
+    /// A RadioText that stayed unchanged for ≥ 1.5 s.
     pub rt: String,
+    /// Block error rate (0..1) from the first PI to the end of the check.
     pub bler: Option<f32>,
     pub groups_per_sec: f32,
+    /// Feature flags/counts: RT+ tags seen, number of EON stations, TMC, clock time.
     pub rtplus: bool,
     pub eon: usize,
     pub tmc: bool,
     pub clock: bool,
+    /// Announced Open Data Applications (descriptions).
     pub oda: Vec<String>,
     /// seconds until the full PS was received
     pub ps_secs: Option<f32>,
     /// another (stronger) preset carries the same PI: this is likely a distant transmitter of it
     pub same_pi_as: Option<u64>,
+    /// Local time of the scan, "YYYY-MM-DD HH:MM".
     pub scanned: String,
 }
 
 impl FmPreset {
+    /// Display name: the user's name, else the PS, else the frequency.
     pub fn label(&self) -> String {
         if !self.name.trim().is_empty() {
             self.name.trim().to_string()
@@ -75,21 +114,36 @@ impl Default for FmScanConfig {
     }
 }
 
+/// Where the scan is. Each variant carries the state for that phase, so there are no
+/// half-valid fields lying around: moving to the next window or candidate means replacing
+/// the whole variant. `fm_scan_advance` matches on `&mut sc.phase` and updates the fields
+/// in place through the `&mut` bindings.
 pub enum FmScanPhase {
+    /// Measuring window `window` (index into `FmScan::centers`), tuned at time `t0`;
+    /// `frames` = spectrum frames used so far.
     Survey { window: usize, t0: f64, frames: usize },
     Verify {
+        /// Index into `FmScan::candidates` (which itself indexes `grid`/`levels`).
         index: usize,
+        /// When this frequency was tuned; all waits are measured from here.
         t0: f64,
+        /// Polls with pilot lock (stereo needs ≥ 3).
         pilot_seen: u32,
+        /// A PI has been decoded on this frequency.
         rds_seen: bool,
+        /// Seconds after `t0` when the first stable PS appeared.
         ps_at: Option<f64>,
+        /// Running sum/count of the channel level for the average.
         level_sum: f64,
         level_n: u32,
         tr: Track,
         /// frequency being listened to (the candidate, or a neighbour of it)
         freq: u64,
         /// neighbours still to try when the candidate showed no RDS
+        /// (None = not trying neighbours; Some(empty) = done trying)
         alts: Option<Vec<u64>>,
+        /// The candidate's own result, kept while neighbours are tried; used if none has RDS.
+        /// Boxed because FmPreset is large and the enum would otherwise grow to its size.
         base: Option<Box<FmPreset>>,
     },
 }
@@ -98,25 +152,36 @@ pub enum FmScanPhase {
 /// the same for a while, so a scrolling PS can't produce a mixed name like "NPO   EK".
 #[derive(Default)]
 pub struct Track {
+    /// The PS at the previous observation and when it took that value.
     last_ps: String,
     last_ps_since: f64,
     /// stable PS values in order of appearance, with how long each was seen
     ps_seen: Vec<(String, f64)>,
+    /// Same idea for RadioText; `rt` is the last value that stayed for ≥ 1.5 s.
     last_rt: String,
     last_rt_since: f64,
     rt: String,
+    /// RDS block counters (ok, corrected, failed) when the first PI arrived, so the BLER
+    /// can be computed for this station only.
     blocks0: Option<(u64, u64, u64)>,
+    /// Time of the previous observation, for accumulating durations.
     last_t: f64,
 }
 
 impl Track {
+    /// Called on every poll with the current PS and RT. A PS becomes "stable" once it has
+    /// been unchanged for 1 s; from then on its entry in `ps_seen` accumulates time (dt per
+    /// poll). Returns true when a PS becomes stable for the first time (a new page).
     fn observe(&mut self, t: f64, ps: &str, rt: &str) -> bool {
+        // time since the last poll, capped so a stall (e.g. window drag) doesn't count much
         let dt = (t - self.last_t).clamp(0.0, 0.5);
         self.last_t = t;
         let mut new_stable = false;
-        if !ps.is_empty() {
+        // `ps` is the raw 8-character PS (not trimmed), so segment positions are preserved
+        if !ps.trim().is_empty() {
             if ps == self.last_ps {
                 if t - self.last_ps_since >= 1.0 {
+                    // find this page's entry (iter_mut gives &mut to the tuple) or add it
                     match self.ps_seen.iter_mut().find(|(p, _)| p == ps) {
                         Some(e) => e.1 += dt,
                         None => {
@@ -147,38 +212,95 @@ impl Track {
     fn name(&self) -> String {
         match self.ps_seen.len() {
             0 => String::new(),
-            1 => self.ps_seen[0].0.clone(),
+            1 => self.ps_seen[0].0.trim().to_string(),
             _ => {
+                // Several stable pages: a scrolling PS (or garbled reads). Keep, in order of
+                // appearance, the pages that
+                // * were seen for at least 30 % of the longest page's time (one-off reads go),
+                // * are not a stitch of segments from pages seen longer (is_mixed_page), and
+                // * are not within 2 characters of a page seen longer (corrupted copies).
                 let best = self.ps_seen.iter().map(|x| x.1).fold(0.0, f64::max);
-                let pages: Vec<&str> = self.ps_seen.iter().filter(|x| x.1 >= 0.3 * best).map(|x| x.0.as_str()).collect();
+                let pages: Vec<&str> = self
+                    .ps_seen
+                    .iter()
+                    .filter(|(p, secs)| {
+                        if *secs < 0.3 * best {
+                            return false;
+                        }
+                        // pages seen longer than this one (ties don't count, so two real
+                        // pages of equal time can't knock each other out)
+                        let longer: Vec<&str> = self.ps_seen.iter().filter(|(q, s)| q != p && *s > *secs).map(|(q, _)| q.as_str()).collect();
+                        !is_mixed_page(p, &longer) && !longer.iter().any(|q| ps_distance(p, q) <= 2)
+                    })
+                    .map(|x| x.0.trim())
+                    .collect();
                 if pages.len() == 1 {
                     return pages[0].to_string();
                 }
+                // up to 3 pages' worth joins nicely; longer (song titles in the PS) → longest page
                 let joined = pages.join(" ");
-                if joined.chars().count() <= 24 {
+                if !pages.is_empty() && joined.chars().count() <= 24 {
                     joined
                 } else {
-                    self.ps_seen.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|x| x.0.clone()).unwrap_or_default()
+                    self.ps_seen.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|x| x.0.trim().to_string()).unwrap_or_default()
                 }
             }
         }
     }
 }
 
+/// Survey geometry for live sources, as fractions of the sample rate. A channel is measured
+/// only when it lies between SURVEY_DC and SURVEY_EDGE from the window centre: inside that
+/// the spectrum is flat. Nearer the centre is the DC spike; further out is the analogue
+/// anti-alias filter (the HackRF's is set to 0.75·rate wide, i.e. ±0.375·rate), whose slope
+/// tilts the levels and moved peaks one 100 kHz channel over. Windows are SURVEY_STEP apart;
+/// STEP + DC ≤ EDGE guarantees every channel lands in the flat ring of some window.
+const SURVEY_DC: f64 = 0.06;
+const SURVEY_EDGE: f64 = 0.34;
+const SURVEY_STEP: f64 = 0.27;
+
+/// True if `p` looks like two pages of a scrolling PS stitched together: every 2-character
+/// segment of it equals the same segment of one of the `others` (PS segments arrive
+/// separately, so a page change mid-cycle can publish half old, half new text).
+fn is_mixed_page(p: &str, others: &[&str]) -> bool {
+    let pad = |s: &str| -> Vec<char> { s.chars().chain(std::iter::repeat(' ')).take(8).collect() };
+    let pc = pad(p);
+    let oc: Vec<Vec<char>> = others.iter().map(|o| pad(o)).collect();
+    !oc.is_empty() && !oc.iter().any(|o| *o == pc) && (0..4).all(|i| oc.iter().any(|o| o[2 * i..2 * i + 2] == pc[2 * i..2 * i + 2]))
+}
+
+/// Number of character positions (of the 8) where two PS values differ.
+fn ps_distance(a: &str, b: &str) -> usize {
+    let pad = |s: &str| -> Vec<char> { s.chars().chain(std::iter::repeat(' ')).take(8).collect() };
+    pad(a).iter().zip(pad(b).iter()).filter(|(x, y)| x != y).count()
+}
+
+/// A scan in progress (lives in `RfaApp::fm_scan` while running).
+///
+/// `grid` and `levels` are parallel arrays: `levels[k]` is the strongest level measured for
+/// frequency `grid[k]`. `candidates` holds indices into both.
 pub struct FmScan {
+    /// Copy of the settings at start (changing them mid-scan has no effect).
     pub cfg: FmScanConfig,
+    /// Channel frequencies start..=end in `step_hz` steps.
     pub grid: Vec<u64>,
+    /// Best level per grid channel (dB); −∞ until measured.
     pub levels: Vec<f32>,
+    /// Source centre frequencies for the survey windows.
     pub centers: Vec<u64>,
+    /// Source sample rate, Hz.
     pub rate: f64,
     pub floor_db: f32,
+    /// Indices into `grid` of the carriers to verify, in frequency order.
     pub candidates: Vec<usize>,
     pub phase: FmScanPhase,
     pub found: Vec<FmPreset>,
+    /// What to restore afterwards: (mode, channel freq, source freq, muted, rds enabled).
     pub prev: (Mode, u64, u64, bool, bool),
     pub started: f64,
 }
 
+/// Progress shown in the UI; outlives the scan so the log stays visible.
 #[derive(Default)]
 pub struct FmScanStatus {
     pub running: bool,
@@ -195,6 +317,7 @@ pub fn level_at(db: &[f32], center: f64, rate: f64, f: f64, dc_excl: f64, edge: 
     if off.abs() < dc_excl || off.abs() > edge {
         return None;
     }
+    // centre bin of f in the FFT-shifted frame, and ±50 kHz expressed in bins (at least 1)
     let n = db.len() as f64;
     let bin = (off / rate + 0.5) * n;
     let hw = (50_000.0 / rate * n).max(1.0);
@@ -203,6 +326,7 @@ pub fn level_at(db: &[f32], center: f64, rate: f64, f: f64, dc_excl: f64, edge: 
     if a >= b {
         return None;
     }
+    // average in linear power, then back to dB
     let p: f64 = db[a..=b].iter().map(|&d| 10f64.powf(d as f64 / 10.0)).sum::<f64>() / (b - a + 1) as f64;
     Some((10.0 * p.max(1e-20).log10()) as f32)
 }
@@ -214,6 +338,7 @@ pub fn pick_candidates(levels: &[f32], threshold_db: f32) -> (f32, Vec<usize>) {
     if v.is_empty() {
         return (f32::NEG_INFINITY, Vec::new());
     }
+    // most of the band is empty, so a low percentile is a robust noise-floor estimate
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let floor = v[v.len() / 5];
     let mut out = Vec::new();
@@ -224,6 +349,7 @@ pub fn pick_candidates(levels: &[f32], threshold_db: f32) -> (f32, Vec<usize>) {
         }
         let left = if i > 0 { levels[i - 1] } else { f32::NEG_INFINITY };
         let right = levels.get(i + 1).copied().unwrap_or(f32::NEG_INFINITY);
+        // `>=` on the left, `>` on the right: of a flat top only the last channel is kept
         if l >= left && l > right {
             out.push(i);
         }
@@ -232,6 +358,8 @@ pub fn pick_candidates(levels: &[f32], threshold_db: f32) -> (f32, Vec<usize>) {
 }
 
 impl RfaApp {
+    /// Starts a scan: remembers the current state, switches to WFM with RDS on and audio
+    /// muted, builds the channel grid and survey windows, and tunes the first window.
     pub fn start_fm_scan(&mut self) {
         if self.scan.is_some() {
             self.stop_scan();
@@ -247,16 +375,19 @@ impl RfaApp {
         }
         let cfg = self.s.fm_scan.clone();
         let step = cfg.step_hz.max(10_000);
+        // infinite counter mapped to frequencies, cut off at the band end
         let grid: Vec<u64> = (0..).map(|i| cfg.start_hz + i * step).take_while(|&f| f <= cfg.end_hz).collect();
         let rate = self.s.source.sample_rate as f64;
         let centers = if self.s.source.kind == SourceKind::File {
             vec![self.s.source.frequency]
         } else {
-            // windows 0.35*rate apart; each channel is measured 0.06..0.42*rate from some centre
-            let w = 0.35 * rate;
+            // windows SURVEY_STEP*rate apart, starting 0.2*rate below the band (so the first
+            // channel is in the first window's flat ring) and continuing until the band end
+            // is covered; see the SURVEY_* constants
+            let w = SURVEY_STEP * rate;
             let mut c = cfg.start_hz as f64 - 0.2 * rate;
             let mut v = Vec::new();
-            while c < cfg.end_hz as f64 + 0.42 * rate {
+            while c < cfg.end_hz as f64 + SURVEY_EDGE * rate {
                 v.push(((c / 1000.0).round() * 1000.0) as u64);
                 c += w;
             }
@@ -291,7 +422,11 @@ impl RfaApp {
         self.fm_tune_window(first, rate);
     }
 
+    /// Ends the scan (finished = completed, false = cancelled) and restores the previous
+    /// mode, frequency, mute and RDS state. Only a completed scan replaces the presets.
     pub fn stop_fm_scan(&mut self, finished: bool) {
+        // take() moves the scan out of self, so the borrow checker lets us call other
+        // &mut self methods below while using `sc`
         let Some(sc) = self.fm_scan.take() else { return };
         let (mode, ch, src, muted, rds) = sc.prev;
         self.s.muted = muted;
@@ -336,6 +471,7 @@ impl RfaApp {
         }
     }
 
+    /// Points the source at survey window centre `c`.
     fn fm_tune_window(&mut self, c: u64, rate: f64) {
         if self.s.source.kind == SourceKind::File {
             return;
@@ -349,17 +485,22 @@ impl RfaApp {
     pub fn fm_scan_frames(&mut self, frames: &[crate::engine::SpectrumFrame]) {
         let file = self.s.source.kind == SourceKind::File;
         let now = self.now();
+        // only during the survey; `let ... else` exits for any other phase. `window`, `t0` and
+        // `count` are &mut references into the enum variant.
         let Some(sc) = self.fm_scan.as_mut() else { return };
         let FmScanPhase::Survey { window, t0, frames: count } = &mut sc.phase else { return };
+        // give the hardware time to retune and the spectrum averaging time to settle
         if now - *t0 < 0.35 {
             return;
         }
         let c = sc.centers[*window] as f64;
-        let (dc, edge) = if file { (0.0, 0.45 * sc.rate) } else { (0.06 * sc.rate, 0.42 * sc.rate) };
+        let (dc, edge) = if file { (0.0, 0.45 * sc.rate) } else { (SURVEY_DC * sc.rate, SURVEY_EDGE * sc.rate) };
         for fr in frames {
+            // ignore frames still from the previous window (or another rate)
             if (fr.center - c).abs() > 500.0 || (fr.rate - sc.rate).abs() > 1.0 {
                 continue;
             }
+            // update the max level for every grid channel this frame can measure
             for (k, &g) in sc.grid.iter().enumerate() {
                 if let Some(l) = level_at(&fr.db, fr.center, fr.rate, g as f64, dc, edge) {
                     if l > sc.levels[k] {
@@ -374,6 +515,8 @@ impl RfaApp {
     /// Advances the scan; called once per UI frame.
     pub fn fm_scan_step(&mut self) {
         let now = self.now();
+        // "take / put back": move the scan out of self so fm_scan_advance can borrow both
+        // `self` (for status, tuning) and `sc` mutably at the same time
         let Some(mut sc) = self.fm_scan.take() else { return };
         let finished = self.fm_scan_advance(&mut sc, now);
         self.fm_scan = Some(sc);
@@ -386,6 +529,7 @@ impl RfaApp {
     fn fm_scan_advance(&mut self, sc: &mut FmScan, now: f64) -> bool {
         match &mut sc.phase {
             FmScanPhase::Survey { window, t0, frames } => {
+                // move on after ≥ 6 frames and 0.8 s, or after 4 s regardless
                 let enough = *frames >= 6 && now - *t0 > 0.8;
                 if !(enough || now - *t0 > 4.0) {
                     return false;
@@ -427,6 +571,7 @@ impl RfaApp {
                 if t >= 1.2 && self.fm.pilot_locked && self.fm.pilot_db > -45.0 {
                     *pilot_seen += 1;
                 }
+                // snapshot of the RDS state the engine published (None = no PI yet)
                 let r = self.rds.clone();
                 // RDS only when a PI was decoded (block sync alone happens on noise)
                 if r.as_ref().map(|r| r.pi.is_some()).unwrap_or(false) {
@@ -436,7 +581,8 @@ impl RfaApp {
                     let st = &self.rds_stats;
                     tr.blocks0 = Some((st.blocks_ok, st.blocks_corrected, st.blocks_failed));
                 }
-                let (ps_now, rt_now) = r.as_ref().map(|r| (r.ps.trim().to_string(), r.rt.trim().to_string())).unwrap_or_default();
+                // PS untrimmed (Track compares segment positions), RT trimmed
+                let (ps_now, rt_now) = r.as_ref().map(|r| (r.ps.clone(), r.rt.trim().to_string())).unwrap_or_default();
                 if tr.observe(t, &ps_now, &rt_now) && ps_at.is_none() {
                     *ps_at = Some(t);
                 }
@@ -456,6 +602,8 @@ impl RfaApp {
                 } else {
                     3.5
                 };
+                // finished with this frequency when: no RDS within the no-RDS wait, or 4.5 s
+                // after the first stable PS (time for RT, AF, ECC...), or the hard maximum
                 let done = (!*rds_seen && t >= no_rds_wait.min(max)) || ps_at.map(|p| t >= p + 4.5).unwrap_or(false) || t >= max;
                 if !done {
                     return false;
@@ -474,6 +622,7 @@ impl RfaApp {
                     scanned: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
                     ..Default::default()
                 };
+                // copy the RDS attributes only if a PI was seen on *this* frequency
                 if let Some(r) = r.filter(|_| *rds_seen) {
                     p.pi = r.pi;
                     // only a PS that stayed the same; partial or mixed ones make poor labels
@@ -507,7 +656,7 @@ impl RfaApp {
                 }
                 // a strong carrier without RDS may be a station whose peak the survey placed one step
                 // off (seen on the HackRF): listen on the neighbouring channels before giving up
-                if !p.rds && alts.is_none() && snr >= 15.0 {
+                if !p.rds && alts.is_none() && snr >= 12.0 {
                     let step = sc.cfg.step_hz.max(10_000);
                     let taken: Vec<u64> = sc.candidates.iter().map(|&i| sc.grid[i]).collect();
                     let v: Vec<u64> = [f + step, f.saturating_sub(step)]
@@ -519,6 +668,10 @@ impl RfaApp {
                         *alts = Some(v);
                     }
                 }
+                // Neighbour handling. Cases:
+                // * no RDS and neighbours left → tune the next neighbour and keep waiting
+                // * a neighbour has RDS → keep it (drop `base`) and stop trying neighbours
+                // * neighbours exhausted → fall through and record `base` (below)
                 if !p.rds || base.is_some() {
                     if p.rds {
                         // a neighbour carries the RDS: keep that one instead of the candidate
@@ -528,6 +681,7 @@ impl RfaApp {
                         *base = None;
                         *alts = Some(Vec::new());
                     }
+                    // pop the next neighbour, if any, and reset the per-frequency state
                     if let Some(next_alt) = alts.as_mut().and_then(|v| if v.is_empty() { None } else { Some(v.remove(0)) }) {
                         *t0 = now;
                         *pilot_seen = 0;
@@ -543,6 +697,7 @@ impl RfaApp {
                     }
                 }
                 // neighbours tried without RDS: keep what the candidate itself showed
+                // (`*b` moves the preset out of its Box)
                 let p = match base.take() {
                     Some(b) if !p.rds => *b,
                     _ => p,
@@ -564,6 +719,7 @@ impl RfaApp {
                 fm_log(&line);
                 self.fm_scan_status.log.push(line);
                 sc.found.push(p);
+                // progress: survey is the first 30 %, verification the remaining 70 %
                 let next = *index + 1;
                 self.fm_scan_status.progress = 0.3 + 0.7 * next as f32 / sc.candidates.len() as f32;
                 if next >= sc.candidates.len() {
@@ -578,6 +734,7 @@ impl RfaApp {
         }
     }
 
+    /// Tunes a preset (cancels a running scan, switches to WFM, starts the source if needed).
     pub fn tune_preset(&mut self, freq: u64) {
         if self.fm_scan.is_some() {
             self.stop_fm_scan(false);
@@ -595,9 +752,13 @@ impl RfaApp {
 /// Flags presets whose PI also belongs to a stronger preset (a distant transmitter of the same
 /// programme, or an image of it) and lets them borrow that station's PS if they have none.
 pub fn mark_same_pi(found: &mut [FmPreset]) {
+    // We need to read all presets while modifying each one. Rust won't allow an immutable
+    // and a mutable borrow of `found` at once, so first copy the few fields we compare
+    // (freq, PI, level, PS) into a separate Vec and search that instead.
     let snapshot: Vec<(u64, Option<u16>, f32, String)> = found.iter().map(|p| (p.freq, p.pi, p.level_db, p.ps.clone())).collect();
     for p in found.iter_mut() {
         let Some(pi) = p.pi else { continue };
+        // the strongest *other* preset with the same PI that is stronger than this one
         if let Some(best) = snapshot
             .iter()
             .filter(|(f, q, l, _)| *f != p.freq && *q == Some(pi) && *l > p.level_db)
@@ -614,6 +775,7 @@ pub fn mark_same_pi(found: &mut [FmPreset]) {
 /// Presets as CSV (one row per station).
 pub fn presets_csv(list: &[FmPreset]) -> String {
     let mut s = String::from("freq_mhz,name,ps,same_pi_as_mhz,pi,pty,stereo,rds,tp,ta,country,ecc,level_db,snr_db,bler_pct,groups_per_s,af_mhz,rt,ptyn,long_ps,rtplus,eon,tmc,clock,oda,scanned\n");
+    // CSV quoting: wrap in quotes and double any embedded quote
     let q = |x: &str| format!("\"{}\"", x.replace('"', "\"\""));
     for p in list {
         s.push_str(&format!(
@@ -688,6 +850,23 @@ mod tests {
         }
         assert_eq!(tr.name(), "NPO PASSIEK");
         let _ = t;
+    }
+
+    #[test]
+    fn stitched_pages_are_dropped() {
+        // two real pages, a stitch of them and a corrupted copy, each seen long enough to pass
+        // the 30 % rule on time alone
+        let mut tr = Track::default();
+        tr.ps_seen = vec![
+            ("RADIO 2 ".into(), 6.0),
+            ("RADIR2  ".into(), 2.0), // RA DI from page 1, R2 and blanks from page 2
+            ("NPO R2  ".into(), 4.0),
+            ("RAO O 2 ".into(), 2.5), // 2 characters off "RADIO 2 "
+        ];
+        assert_eq!(tr.name(), "RADIO 2 NPO R2");
+        assert!(is_mixed_page("KLO     ", &["NPO     ", "KLASSIEK"]));
+        assert!(!is_mixed_page("KLASSIEK", &["NPO     "]));
+        assert_eq!(ps_distance("RAO O 2", "RADIO 2"), 2);
     }
 
     #[test]

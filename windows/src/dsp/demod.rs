@@ -1,6 +1,11 @@
 //! Analog demodulators. Each runs at its mode's fixed baseband rate and appends stereo audio at
 //! 48 kHz. Channel width semantics follow the Android app: AM/FM use it as the one-sided
 //! (half) bandwidth, SSB as the audio bandwidth, CW as the full filter width around the tone.
+//!
+//! Common pattern: every demodulator owns its filters and a reusable `tmp` buffer, rebuilds
+//! its filters only when `set_width` gets a different value, and in `process` appends
+//! `[left, right]` frames to the caller's `out` Vec (mono modes write the same value twice).
+//! The input is already centred on the station at `Mode::baseband_rate()` (see Channelizer).
 
 use super::filters::{bandpass_taps_complex, design_lowpass, DcBlock, DecimFirC, DecimFirCC, DecimFirR};
 use super::mpx::MpxDemodulator;
@@ -14,9 +19,12 @@ pub const CW_OFFSET_HZ: f64 = 750.0;
 
 /// Simple audio AGC: peak envelope with fast attack and slow decay.
 pub struct Agc {
+    /// Envelope estimate (follows |x|).
     env: f32,
+    /// One-pole coefficients: 2 ms time constant when rising, 500 ms when falling.
     attack: f32,
     decay: f32,
+    /// Output level the envelope is scaled to.
     target: f32,
 }
 impl Agc {
@@ -35,10 +43,14 @@ impl Agc {
     }
 }
 
+/// AM: channel filter → envelope |IQ| → remove the carrier's DC → audio low-pass and
+/// decimate to 48 kHz → AGC.
 pub struct AmDemod {
     rate: f64,
     width: u32,
+    /// Complex low-pass at ±width (no decimation).
     chan: DecimFirC,
+    /// Real audio low-pass that also decimates rate → 48 kHz.
     audio: DecimFirR,
     dc: DcBlock,
     agc: Agc,
@@ -73,6 +85,8 @@ impl AmDemod {
         self.tmp.clear();
         self.chan.process(input, &mut self.tmp);
         for c in &self.tmp {
+            // c.norm() = sqrt(I²+Q²) is the envelope; push returns true when a decimated
+            // output is ready (every `dec`-th input)
             let e = self.dc.step(c.norm());
             if self.audio.push(e) {
                 let y = self.agc.step(self.audio.output);
@@ -82,6 +96,7 @@ impl AmDemod {
     }
 }
 
+/// Narrow FM: channel filter → phase-difference discriminator → 3 kHz audio low-pass.
 pub struct NfmDemod {
     rate: f64,
     width: u32,
@@ -113,6 +128,7 @@ impl NfmDemod {
         self.width = width;
         let w = width as f64;
         self.chan = DecimFirC::new(design_lowpass(self.rate, w, w * 0.2, 2001), 1);
+        // radians/sample → audio: assume the peak deviation is 75 % of the channel half-width
         self.gain = (self.rate / (2.0 * PI * w * 0.75)) as f32;
     }
     pub fn process(&mut self, input: &[C32], out: &mut Vec<[f32; 2]>) {
@@ -120,6 +136,7 @@ impl NfmDemod {
         self.chan.process(input, &mut self.tmp);
         let mut p = self.last;
         for &x in &self.tmp {
+            // angle of x·conj(prev) = phase step = instantaneous frequency (see mpx.rs)
             let d = x * p.conj();
             p = x;
             let v = self.gain * d.im.atan2(d.re);
@@ -132,6 +149,8 @@ impl NfmDemod {
     }
 }
 
+/// Broadcast FM: optional extra channel filter, then the stereo MPX decoder. `mpx` is public
+/// so the engine can read the pilot state and the MPX samples for RDS.
 pub struct WfmDemod {
     rate: f64,
     width: u32,
@@ -167,6 +186,7 @@ impl WfmDemod {
         } else {
             self.mpx.process(input, out);
         }
+        // only touch the frames this call appended (out may already hold earlier audio)
         for s in &mut out[start..] {
             s[0] = (s[0] * 0.8).clamp(-1.0, 1.0);
             s[1] = (s[1] * 0.8).clamp(-1.0, 1.0);
@@ -174,6 +194,8 @@ impl WfmDemod {
     }
 }
 
+/// SSB: a complex band-pass keeps only one side of 0 Hz (200 Hz..width for USB, the mirror
+/// for LSB). Once the other sideband is gone, the real part of the complex signal is the audio.
 pub struct SsbDemod {
     rate: f64,
     width: u32,
@@ -215,6 +237,8 @@ impl SsbDemod {
     }
 }
 
+/// CW: shift the signal up by 750 Hz so a carrier at the tuned frequency becomes a 750 Hz
+/// tone, then a narrow complex band-pass around +750 Hz and take the real part, like SSB.
 pub struct CwDemod {
     rate: f64,
     width: u32,
@@ -263,7 +287,8 @@ impl CwDemod {
     }
 }
 
-/// The demodulator for the current mode.
+/// The demodulator for the current mode. An enum (rather than a trait object) so the engine
+/// can match on it, e.g. to reach the WFM MPX state; WFM is boxed because it is much larger.
 pub enum Demod {
     Off,
     Am(AmDemod),

@@ -1,4 +1,10 @@
 //! IQ sources: RTL-SDR and HackRF (through their DLLs), rtl_tcp and IQ files.
+//!
+//! Every source implements [`Source`]. `start` spawns the source's own thread (or registers a
+//! driver callback), which converts the device's raw samples to `C32` and sends them as
+//! [`IqBlock`]s over a bounded channel to the engine. When that thread ends it drops the
+//! `Sender`, and the engine sees the channel disconnect ("the source stopped").
+//! The RTL-SDR and HackRF libraries are linked statically (see build.rs).
 
 pub mod file;
 pub mod hackrf;
@@ -19,6 +25,7 @@ pub struct IqBlock {
     pub rate: u32,
 }
 
+/// Common interface of all IQ sources. `Send` because the engine thread owns the boxed source.
 pub trait Source: Send {
     /// Starts streaming into `tx`.
     fn start(&mut self, tx: Sender<IqBlock>) -> Result<(), String>;
@@ -37,6 +44,7 @@ pub trait Source: Send {
     }
 }
 
+/// Creates (but doesn't start) the source chosen in the settings.
 pub fn open(cfg: &SourceConfig) -> Result<Box<dyn Source>, String> {
     match cfg.kind {
         SourceKind::RtlSdr => Ok(Box::new(rtlsdr::RtlSdrSource::open(cfg)?)),
@@ -51,6 +59,10 @@ pub fn hw_freq(cfg: &SourceConfig) -> u64 {
     (cfg.frequency as i64 - cfg.freq_offset).max(0) as u64
 }
 
+// Raw → C32 converters. Raw IQ is interleaved I,Q,I,Q...; `chunks_exact(k)` walks it one
+// complex sample (k bytes) at a time and ignores a trailing partial sample. All scale to ±1.
+
+/// Unsigned 8-bit (RTL-SDR): 0..255 with the zero point at ~127.4.
 pub fn convert_u8(raw: &[u8], out: &mut Vec<C32>) {
     out.reserve(raw.len() / 2);
     for p in raw.chunks_exact(2) {
@@ -58,6 +70,7 @@ pub fn convert_u8(raw: &[u8], out: &mut Vec<C32>) {
     }
 }
 
+/// Signed 8-bit (HackRF): reinterpret each byte as i8 (`as i8` keeps the bit pattern).
 pub fn convert_i8(raw: &[u8], out: &mut Vec<C32>) {
     out.reserve(raw.len() / 2);
     for p in raw.chunks_exact(2) {
@@ -65,6 +78,7 @@ pub fn convert_i8(raw: &[u8], out: &mut Vec<C32>) {
     }
 }
 
+/// Signed 16-bit little-endian, 4 bytes per complex sample.
 pub fn convert_i16(raw: &[u8], out: &mut Vec<C32>) {
     out.reserve(raw.len() / 4);
     for p in raw.chunks_exact(4) {
@@ -74,6 +88,7 @@ pub fn convert_i16(raw: &[u8], out: &mut Vec<C32>) {
     }
 }
 
+/// 32-bit float little-endian, 8 bytes per complex sample (already ±1).
 pub fn convert_f32(raw: &[u8], out: &mut Vec<C32>) {
     out.reserve(raw.len() / 8);
     for p in raw.chunks_exact(8) {

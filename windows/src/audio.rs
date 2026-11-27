@@ -10,8 +10,13 @@ use std::sync::Arc;
 
 pub const IN_RATE: f64 = 48_000.0;
 
+/// State shared between the engine (producer), the cpal callback (consumer) and the UI.
+/// Lives in an `Arc`. Scalars are atomics so the UI can read meters and set volume without
+/// locking; only the sample queue needs a mutex (held for microseconds by either side).
 pub struct AudioShared {
+    /// FIFO of 48 kHz stereo frames: engine pushes at the back, callback pops at the front.
     queue: Mutex<VecDeque<[f32; 2]>>,
+    /// f32 stored as its bit pattern (there is no AtomicF32): `to_bits` / `from_bits`.
     volume: AtomicU32,
     muted: AtomicBool,
     pub underruns: AtomicU32,
@@ -41,6 +46,7 @@ impl AudioShared {
         let mut q = self.queue.lock();
         q.extend(samples.iter().copied());
         // never let latency grow beyond ~0.5 s
+        // (above 24 000 frames = 0.5 s, cut back to 9 600 = 0.2 s by dropping the oldest)
         if q.len() > 24_000 {
             let drop = q.len() - 9_600;
             q.drain(..drop);
@@ -66,6 +72,8 @@ impl AudioShared {
 /// mode, and the UI thread is already single-threaded (reopening there fails with
 /// RPC_E_CHANGED_MODE, which left the app silent after sleep/wake). Dropping this stops it.
 pub struct AudioOut {
+    /// Never sent on: dropping it disconnects the channel, which wakes the audio thread's
+    /// `recv()` so it drops the stream and exits.
     _stop: crossbeam_channel::Sender<()>,
     pub device_name: String,
     pub device_rate: u32,
@@ -92,7 +100,10 @@ fn device_names_here() -> Vec<String> {
 }
 
 impl AudioOut {
+    /// Opens `wanted` (a device name; "" = system default) on a new "audio-out" thread and
+    /// waits up to 5 s for that thread to report success (name, rate) or an error.
     pub fn open(shared: Arc<AudioShared>, wanted: &str) -> Result<AudioOut, String> {
+        // stop: UI → audio thread (by dropping). res: audio thread → caller, one message.
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
         let (res_tx, res_rx) = crossbeam_channel::bounded::<Result<(String, u32), String>>(1);
         let wanted = wanted.to_string();
@@ -155,6 +166,8 @@ impl AudioOut {
             crate::log_line(&format!("audio stream error: {e}"));
             failed.stream_failed.store(true, Ordering::Relaxed);
         };
+        // The callback closure owns its Resampler state and an Arc to the shared queue. One
+        // generic `fill` serves every sample format; `conv` turns a float into that format.
         let mut state = Resampler::new(IN_RATE / rate as f64);
         let sh = shared.clone();
         let stream = match format {
@@ -185,11 +198,20 @@ impl AudioOut {
     }
 }
 
+/// 48 kHz → device rate, by linear interpolation between consecutive queue frames.
+///
+/// Clock drift: the SDR and the sound card run on different crystals, so over minutes the
+/// engine produces slightly more or fewer frames than the card consumes. Rather than letting
+/// the queue run dry or overflow, `fill` speeds up or slows down consumption by up to 1 %
+/// depending on how far the queue is from its 100 ms target (inaudible pitch change).
 struct Resampler {
-    nominal: f64, // input samples per output sample
+    /// Input frames per output frame at nominal clocks (48000 / device rate).
+    nominal: f64,
+    /// Fractional position between `prev` (0.0) and `cur` (1.0).
     pos: f64,
     prev: [f32; 2],
     cur: [f32; 2],
+    /// False until 100 ms is queued (and again after an underrun), outputting silence.
     primed: bool,
 }
 
@@ -198,6 +220,8 @@ impl Resampler {
         Self { nominal, pos: 0.0, prev: [0.0; 2], cur: [0.0; 2], primed: false }
     }
 
+    /// Fills one device buffer. `data` is interleaved: frame f, channel c is at
+    /// `data[f * channels + c]`.
     fn fill<T: Copy>(&mut self, sh: &AudioShared, data: &mut [T], channels: usize, conv: impl Fn(f32) -> T) {
         sh.callbacks.fetch_add(1, Ordering::Relaxed);
         let vol = if sh.muted.load(Ordering::Relaxed) { 0.0 } else { f32::from_bits(sh.volume.load(Ordering::Relaxed)) };
@@ -214,10 +238,12 @@ impl Resampler {
             }
             self.primed = true;
         }
+        // queue fill error, relative (−1 = empty, 0 = on target); proportional rate trim, ±1 %
         let err = (q.len() as f64 - target) / target;
         let step = self.nominal * (1.0 + (err * 0.005).clamp(-0.01, 0.01));
         let mut peak = 0f32;
         for f in 0..frames {
+            // advance by `step` input frames; each whole frame crossed pulls one from the queue
             self.pos += step;
             while self.pos >= 1.0 {
                 self.pos -= 1.0;
@@ -235,6 +261,7 @@ impl Resampler {
             let l = (self.prev[0] + (self.cur[0] - self.prev[0]) * mu) * vol;
             let r = (self.prev[1] + (self.cur[1] - self.prev[1]) * mu) * vol;
             peak = peak.max(l.abs()).max(r.abs());
+            // write the frame: mono devices get (L+R)/2, extra channels (5.1...) get silence
             let base = f * channels;
             if channels == 1 {
                 data[base] = conv((l + r) * 0.5);
