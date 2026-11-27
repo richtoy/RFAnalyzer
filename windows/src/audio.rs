@@ -20,6 +20,8 @@ pub struct AudioShared {
     pub level: AtomicU32,
     /// Set by the stream's error callback (device removed or reconfigured): reopen the output
     pub stream_failed: AtomicBool,
+    /// Bumped by every output callback; if it stops moving the stream has stalled
+    pub callbacks: AtomicU32,
 }
 
 impl AudioShared {
@@ -32,6 +34,7 @@ impl AudioShared {
             overruns: AtomicU32::new(0),
             level: AtomicU32::new(0),
             stream_failed: AtomicBool::new(false),
+            callbacks: AtomicU32::new(0),
         })
     }
     pub fn push(&self, samples: &[[f32; 2]]) {
@@ -99,6 +102,7 @@ impl AudioOut {
         let failed = shared.clone();
         let err_fn = move |e: cpal::Error| {
             eprintln!("audio stream error: {e}");
+            crate::log_line(&format!("audio stream error: {e}"));
             failed.stream_failed.store(true, Ordering::Relaxed);
         };
         let mut state = Resampler::new(IN_RATE / rate as f64);
@@ -145,6 +149,7 @@ impl Resampler {
     }
 
     fn fill<T: Copy>(&mut self, sh: &AudioShared, data: &mut [T], channels: usize, conv: impl Fn(f32) -> T) {
+        sh.callbacks.fetch_add(1, Ordering::Relaxed);
         let vol = if sh.muted.load(Ordering::Relaxed) { 0.0 } else { f32::from_bits(sh.volume.load(Ordering::Relaxed)) };
         let mut q = sh.queue.lock();
         let frames = data.len() / channels.max(1);

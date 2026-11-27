@@ -18,6 +18,16 @@ mod ui;
 use libusb1_sys as _;
 
 /// %APPDATA%\RFAnalyzer (or ~/.config/rfanalyzer elsewhere), created on demand.
+/// Appends a timestamped line to %APPDATA%\\RFAnalyzer\\rfanalyzer.log (the release build has no
+/// console, so errors would otherwise be lost). Trimmed to the last ~1 MB at startup.
+pub fn log_line(line: &str) {
+    use std::io::Write;
+    let Some(dir) = config_dir() else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("rfanalyzer.log")) {
+        let _ = writeln!(f, "{} {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), line);
+    }
+}
+
 pub fn config_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).or_else(|| {
         std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
