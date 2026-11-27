@@ -77,7 +77,73 @@ impl Default for FmScanConfig {
 
 pub enum FmScanPhase {
     Survey { window: usize, t0: f64, frames: usize },
-    Verify { index: usize, t0: f64, pilot_seen: u32, rds_seen: bool, ps_at: Option<f64>, level_sum: f64, level_n: u32 },
+    Verify { index: usize, t0: f64, pilot_seen: u32, rds_seen: bool, ps_at: Option<f64>, level_sum: f64, level_n: u32, tr: Track },
+}
+
+/// What one station showed while it was being checked: PS and RT only count once they have stayed
+/// the same for a while, so a scrolling PS can't produce a mixed name like "NPO   EK".
+#[derive(Default)]
+pub struct Track {
+    last_ps: String,
+    last_ps_since: f64,
+    /// stable PS values in order of appearance, with how long each was seen
+    ps_seen: Vec<(String, f64)>,
+    last_rt: String,
+    last_rt_since: f64,
+    rt: String,
+    blocks0: Option<(u64, u64, u64)>,
+    last_t: f64,
+}
+
+impl Track {
+    fn observe(&mut self, t: f64, ps: &str, rt: &str) -> bool {
+        let dt = (t - self.last_t).clamp(0.0, 0.5);
+        self.last_t = t;
+        let mut new_stable = false;
+        if !ps.is_empty() {
+            if ps == self.last_ps {
+                if t - self.last_ps_since >= 1.0 {
+                    match self.ps_seen.iter_mut().find(|(p, _)| p == ps) {
+                        Some(e) => e.1 += dt,
+                        None => {
+                            self.ps_seen.push((ps.to_string(), dt));
+                            new_stable = true;
+                        }
+                    }
+                }
+            } else {
+                self.last_ps = ps.to_string();
+                self.last_ps_since = t;
+            }
+        }
+        if rt.chars().count() >= 4 {
+            if rt == self.last_rt {
+                if t - self.last_rt_since >= 1.5 {
+                    self.rt = rt.to_string();
+                }
+            } else {
+                self.last_rt = rt.to_string();
+                self.last_rt_since = t;
+            }
+        }
+        new_stable
+    }
+
+    /// The station's name: the steadiest PS, or for a scrolling PS its pages joined ("NPO PASSIEK").
+    fn name(&self) -> String {
+        match self.ps_seen.len() {
+            0 => String::new(),
+            1 => self.ps_seen[0].0.clone(),
+            _ => {
+                let joined = self.ps_seen.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(" ");
+                if joined.chars().count() <= 24 {
+                    joined
+                } else {
+                    self.ps_seen.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|x| x.0.clone()).unwrap_or_default()
+                }
+            }
+        }
+    }
 }
 
 pub struct FmScan {
@@ -214,6 +280,11 @@ impl RfaApp {
         if finished && !sc.found.is_empty() {
             let mut found = sc.found;
             mark_same_pi(&mut found);
+            for p in found.iter().filter(|p| p.same_pi_as.is_some()) {
+                let line = format!("{:.1} MHz carries the PI of {:.1} MHz ({}): likely another transmitter of it", p.freq as f64 / 1e6, p.same_pi_as.unwrap() as f64 / 1e6, p.ps);
+                fm_log(&line);
+                self.fm_scan_status.log.push(line);
+            }
             // keep the names the user gave stations that were found again
             for f in found.iter_mut() {
                 if let Some(old) = self.s.fm_presets.iter().find(|p| p.freq == f.freq && !p.name.is_empty()) {
@@ -322,13 +393,13 @@ impl RfaApp {
                 if sc.candidates.is_empty() {
                     return true;
                 }
-                sc.phase = FmScanPhase::Verify { index: 0, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0 };
+                sc.phase = FmScanPhase::Verify { index: 0, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0, tr: Track::default() };
                 let f = sc.grid[sc.candidates[0]];
                 self.fm_scan_status.stage = format!("Checking {:.1} MHz", f as f64 / 1e6);
                 self.set_channel(f);
                 false
             }
-            FmScanPhase::Verify { index, t0, pilot_seen, rds_seen, ps_at, level_sum, level_n } => {
+            FmScanPhase::Verify { index, t0, pilot_seen, rds_seen, ps_at, level_sum, level_n, tr } => {
                 let t = now - *t0;
                 if t < 0.8 {
                     return false; // let the engine retune and drop the previous station's RDS
@@ -342,7 +413,12 @@ impl RfaApp {
                 if r.as_ref().map(|r| r.pi.is_some()).unwrap_or(false) {
                     *rds_seen = true;
                 }
-                if ps_at.is_none() && r.as_ref().map(|r| !r.ps.trim().is_empty()).unwrap_or(false) {
+                if *rds_seen && tr.blocks0.is_none() {
+                    let st = &self.rds_stats;
+                    tr.blocks0 = Some((st.blocks_ok, st.blocks_corrected, st.blocks_failed));
+                }
+                let (ps_now, rt_now) = r.as_ref().map(|r| (r.ps.trim().to_string(), r.rt.trim().to_string())).unwrap_or_default();
+                if tr.observe(t, &ps_now, &rt_now) && ps_at.is_none() {
                     *ps_at = Some(t);
                 }
                 if self.channel_db.is_finite() {
@@ -353,7 +429,7 @@ impl RfaApp {
                 // weak carriers get longer to show RDS: they are often distant transmitters
                 let snr = sc.levels[sc.candidates[*index]] - sc.floor_db;
                 let no_rds_wait: f64 = if snr >= 15.0 { 7.0 } else if snr >= 11.0 { 5.0 } else { 3.5 };
-                let done = (!*rds_seen && t >= no_rds_wait.min(max)) || ps_at.map(|p| t >= p + 2.0).unwrap_or(false) || t >= max;
+                let done = (!*rds_seen && t >= no_rds_wait.min(max)) || ps_at.map(|p| t >= p + 3.0).unwrap_or(false) || t >= max;
                 if !done {
                     return false;
                 }
@@ -373,8 +449,8 @@ impl RfaApp {
                 };
                 if let Some(r) = r.filter(|_| *rds_seen) {
                     p.pi = r.pi;
-                    // only a complete PS; a partial one ("RADI") makes a poor label
-                    p.ps = r.ps.trim().to_string();
+                    // only a PS that stayed the same; partial or mixed ones make poor labels
+                    p.ps = tr.name();
                     p.long_ps = r.long_ps.clone();
                     p.pty = r.pty;
                     p.ptyn = r.ptyn.clone();
@@ -384,13 +460,22 @@ impl RfaApp {
                     p.ecc = r.ecc;
                     p.country = r.country_or_guess();
                     p.af = r.af.clone();
-                    p.rt = r.rt.trim().to_string();
+                    p.rt = tr.rt.clone();
                     p.rtplus = r.rtplus_title.is_some() || r.rtplus_artist.is_some();
                     p.eon = r.eon.len();
                     p.tmc = !r.tmc.is_empty() || r.tmc_ltn.is_some();
                     p.clock = r.clock.is_some();
                     p.oda = r.oda.keys().cloned().collect();
-                    p.bler = Some(self.rds_stats.bler);
+                    // error rate since the first PI, not including the time before sync
+                    let st = &self.rds_stats;
+                    p.bler = Some(match tr.blocks0 {
+                        Some((o, c, f)) => {
+                            let ok = st.blocks_ok.saturating_sub(o) + st.blocks_corrected.saturating_sub(c);
+                            let bad = st.blocks_failed.saturating_sub(f);
+                            if ok + bad > 0 { bad as f32 / (ok + bad) as f32 } else { st.bler }
+                        }
+                        None => st.bler,
+                    });
                     p.groups_per_sec = self.rds_stats.groups_per_sec;
                 }
                 let line = format!(
@@ -414,7 +499,7 @@ impl RfaApp {
                 if next >= sc.candidates.len() {
                     return true;
                 }
-                sc.phase = FmScanPhase::Verify { index: next, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0 };
+                sc.phase = FmScanPhase::Verify { index: next, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0, tr: Track::default() };
                 let f = sc.grid[sc.candidates[next]];
                 self.fm_scan_status.stage = format!("Checking {:.1} MHz ({} of {})", f as f64 / 1e6, next + 1, sc.candidates.len());
                 self.set_channel(f);
@@ -518,6 +603,21 @@ mod tests {
         let (floor, c) = pick_candidates(&l, 10.0);
         assert!((floor + 90.0).abs() < 0.01);
         assert_eq!(c, vec![5, 13]);
+    }
+
+    #[test]
+    fn scrolling_ps_is_not_mixed() {
+        let mut tr = Track::default();
+        let mut t = 0.0;
+        // pages "NPO" and "PASSIEK" alternate every 2 s, with a mixed frame in between
+        for i in 0..200 {
+            t = i as f64 * 0.05;
+            let ps = if (t as i32 / 2) % 2 == 0 { "NPO" } else { "PASSIEK" };
+            let ps = if (t % 2.0) < 0.1 && t > 1.0 { "NPO   EK" } else { ps };
+            tr.observe(t, ps, "");
+        }
+        assert_eq!(tr.name(), "NPO PASSIEK");
+        let _ = t;
     }
 
     #[test]
