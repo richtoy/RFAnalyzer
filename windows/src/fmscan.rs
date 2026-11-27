@@ -257,11 +257,18 @@ impl Track {
                     (false, true) => false,
                     _ => q.1 > p.1,
                 };
-                let pages: Vec<&str> = kept
+                let mut pages: Vec<(&str, f64)> = kept
                     .iter()
                     .filter(|p| !kept.iter().any(|q| q.0 != p.0 && ps_distance(&p.0, &q.0) <= 2 && better(q, p)))
-                    .map(|x| x.0.trim())
+                    .map(|x| (x.0.trim(), x.1))
                     .collect();
+                // The pages repeat in a cycle, and the scan can start anywhere in it. Start the
+                // name at the page shown longest, which is usually the station brand ("NPO" in
+                // "NPO KLASSIEK", not "KLASSIEK NPO").
+                if let Some(i) = (0..pages.len()).max_by(|&a, &b| pages[a].1.partial_cmp(&pages[b].1).unwrap()) {
+                    pages.rotate_left(i);
+                }
+                let pages: Vec<&str> = pages.into_iter().map(|x| x.0).collect();
                 if pages.len() == 1 {
                     return pages[0].to_string();
                 }
@@ -953,7 +960,8 @@ mod tests {
         let mut tr = Track::default();
         for i in 0..400 {
             let t = i as f64 * 0.05;
-            let ps = if t % 6.6 < 5.0 { "NPO     " } else { "KLASSIEK" };
+            // starts mid-cycle on KLASSIEK, the name still starts with NPO
+            let ps = if (t + 5.0) % 6.6 < 5.0 { "NPO     " } else { "KLASSIEK" };
             tr.observe(t, ps, "");
         }
         assert_eq!(tr.name(), "NPO KLASSIEK");
