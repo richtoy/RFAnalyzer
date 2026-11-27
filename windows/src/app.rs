@@ -1,4 +1,17 @@
 //! The application: window layout, settings, and the link between the UI and the engine.
+//!
+//! egui is an *immediate-mode* UI: there are no widget objects. Every frame (`eframe::App::ui`)
+//! the whole window is rebuilt from `RfaApp`'s fields, and a widget's return value says whether
+//! it was clicked/changed this frame. So the app's state lives entirely in [`RfaApp`]:
+//! * `s`: the persisted [`Settings`] (widgets edit it directly; saved by `autosave_settings`).
+//! * Engine status snapshot (`running`, `fm`, `rds`, `dab`, ...): copied from the engine's
+//!   shared `Status` once per frame by `poll_status`, so drawing never holds the lock.
+//! * `last_*`: what was last sent to the engine. `sync_engine` compares the settings against
+//!   these and sends a `Cmd` only when something changed, so widgets don't need callbacks.
+//! * Scan state machines (DAB `scan`, FM `fm_scan`), advanced a little every frame.
+//!
+//! Per-frame order (see `ui` at the bottom): poll status → keyboard → audio health → source
+//! reconnect → autosave → scan steps → draw panels → `sync_engine`.
 
 use crate::audio::{AudioOut, AudioShared};
 use crate::dab::model::{self, DabScanState, DabState, SavedEnsemble};
@@ -19,6 +32,8 @@ pub enum SideTab {
     Bookmarks,
 }
 
+/// DAB scan steps per channel: wait for the tune to take effect, wait for OFDM sync (4 s),
+/// wait for ensemble name and services (10 s), then collect for 2.5 s and move on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ScanPhase {
     Tuning,
@@ -28,10 +43,13 @@ pub enum ScanPhase {
 }
 
 #[allow(dead_code)]
+/// A DAB Band III scan in progress.
 pub struct Scan {
     pub channels: Vec<model::DabChannel>,
+    /// Channel being scanned (index into `channels`).
     pub index: usize,
     pub phase: ScanPhase,
+    /// Start of the current phase (seconds since app start); timeouts count from here.
     pub t0: f64,
     pub previous_channel: String,
     /// false when this step's channel was already tuned, so no fresh tune will come
@@ -67,6 +85,8 @@ pub struct RfaApp {
     pub overflows: u64,
     // what was sent to the engine last
     last_src: Option<SourceConfig>,
+    /// (mode, width, channel freq, stereo, de-emphasis µs, rds) as a tuple so a single `!=`
+    /// detects any change
     last_demod: Option<(Mode, u32, u64, bool, u32, bool)>,
     last_disp: (usize, usize, u32),
     last_sq: (bool, i32),
@@ -81,9 +101,11 @@ pub struct RfaApp {
     pub show_help: bool,
     pub scan: Option<Scan>,
     pub scan_state: DabScanState,
+    /// Uploaded slideshow texture and the `slide_serial` it was made from.
     pub slide_tex: Option<(u32, egui::TextureHandle)>,
     pub rtl_devices: Vec<String>,
     pub audio_devices: Vec<String>,
+    /// Sample rate to restore when leaving DAB (which forces 2.048 Msps).
     pub rate_before_dab: Option<u32>,
     pub start_time: std::time::Instant,
     pub toast: Option<(String, f64)>,
@@ -91,16 +113,23 @@ pub struct RfaApp {
     applied_scale: f32,
     applied_dark: Option<bool>,
     /// --scan N: scans still to run automatically, LNA step between them, quit when done
-    auto_scans: u32,
+    pub auto_scans: u32,
     auto_lna_step: i32,
-    auto_quit: bool,
-    auto_next_at: f64,
+    pub auto_quit: bool,
+    /// When the next automatic scan starts; −1 means "close the app now".
+    pub auto_next_at: f64,
+    pub fm_scan: Option<crate::fmscan::FmScan>,
+    pub fm_scan_status: crate::fmscan::FmScanStatus,
+    pub show_fm_window: bool,
+    auto_fm_scan: bool,
     audio_retry_at: f64,
     next_settings_check: f64,
+    /// JSON of the settings as last written; a save happens only when this differs.
     saved_settings: String,
     /// Source stopped by itself (e.g. USB reset after sleep): restart it at this time
     reconnect_at: Option<f64>,
     reconnect_tries: u32,
+    /// (audio callback count, when it last changed): detects a stream that stopped silently.
     audio_watch: (u32, f64),
     next_default_check: f64,
 }
@@ -127,6 +156,8 @@ pub fn icon() -> egui::IconData {
 impl RfaApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // settings.json (written on every change) wins over eframe's store
+        // Option chain: each step yields None on failure (no dir, no file, bad JSON), falling
+        // through to eframe's stored copy and finally to the defaults.
         let s: Settings = crate::config_dir()
             .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
             .and_then(|js| serde_json::from_str(&js).ok())
@@ -134,6 +165,7 @@ impl RfaApp {
             .unwrap_or_default();
         let audio = AudioShared::new();
         let ctx = cc.egui_ctx.clone();
+        // the engine wakes the UI (request_repaint) when it publishes new status
         let engine = Engine::spawn(audio.clone(), move || ctx.request_repaint());
         let (audio_out, audio_error) = match AudioOut::open(audio.clone(), &s.audio_device) {
             Ok(a) => (Some(a), None),
@@ -195,6 +227,10 @@ impl RfaApp {
             auto_lna_step: 0,
             auto_quit: false,
             auto_next_at: 0.0,
+            fm_scan: None,
+            fm_scan_status: Default::default(),
+            show_fm_window: false,
+            auto_fm_scan: false,
             audio_retry_at: 0.0,
             next_settings_check: 0.0,
             saved_settings: String::new(),
@@ -263,6 +299,13 @@ impl RfaApp {
                     i += 1;
                 }
                 "--quit-after-scan" => self.auto_quit = true,
+                "--fm-scan" => {
+                    self.auto_fm_scan = true;
+                    self.auto_next_at = 3.0;
+                    self.s.mode = Mode::Wfm;
+                    self.show_fm_window = true;
+                    start = true;
+                }
                 other if !other.starts_with("--") && std::path::Path::new(other).is_file() => {
                     self.s.source.kind = SourceKind::File;
                     self.s.source.file_path = other.to_string();
@@ -339,6 +382,7 @@ impl RfaApp {
         if js == self.saved_settings {
             return;
         }
+        // write to a temp file and rename: a crash mid-write can't leave a truncated file
         if let Some(dir) = crate::config_dir() {
             let tmp = dir.join("settings.json.tmp");
             if std::fs::write(&tmp, &js).is_ok() && std::fs::rename(&tmp, dir.join("settings.json")).is_ok() {
@@ -362,6 +406,8 @@ impl RfaApp {
         }
     }
 
+    /// Sends the engine whatever changed in the settings since the last call (or everything
+    /// with `force`). Called at the end of every frame.
     fn sync_engine(&mut self, force: bool) {
         let dp = (self.s.mode, self.s.width(self.s.mode), self.channel_freq(), self.s.wfm_stereo, self.s.deemphasis_us as u32, self.s.rds_enabled);
         if force || self.last_demod != Some(dp) {
@@ -427,6 +473,9 @@ impl RfaApp {
     }
 
     pub fn stop(&mut self) {
+        if self.fm_scan.is_some() {
+            self.stop_fm_scan(false);
+        }
         self.reconnect_at = None;
         self.reconnect_tries = 0;
         self.engine.send(Cmd::Stop);
@@ -439,9 +488,13 @@ impl RfaApp {
         if self.running { self.stop() } else { self.start() }
     }
 
+    /// Copies the engine's shared status into the app (lock held only for the copy), then
+    /// feeds the new spectrum frames to the waterfall and the FM survey.
     fn poll_status(&mut self, ctx: &egui::Context) {
+        // clone the Arc first so the guard borrows a local, not `self`, leaving self mutable
         let st = self.engine.status.clone();
         let mut st = st.lock();
+        // take ownership of the queued frames, leaving the engine's queue empty
         let frames: Vec<_> = st.frames.drain(..).collect();
         let was_running = self.running;
         self.running = st.running || (self.running && st.error.is_none());
@@ -465,6 +518,7 @@ impl RfaApp {
         if st.error != self.error && st.error.is_some() {
             self.error = st.error.clone();
         }
+        // the error is consumed (shown once in the status bar)
         st.error = None;
         self.description = st.description.clone();
         self.gains = st.gains.clone();
@@ -490,7 +544,11 @@ impl RfaApp {
         if !st.dab_remembered.is_empty() && st.dab_remembered != self.s.dab_last_service {
             self.s.dab_last_service = st.dab_remembered.clone();
         }
+        // release the lock before the (slower) texture uploads below
         drop(st);
+        if self.fm_scan.is_some() {
+            self.fm_scan_frames(&frames);
+        }
         let d = &self.s.display;
         for f in frames {
             self.view.push_frame(ctx, &f.db, f.center, f.rate, d.db_min, d.db_max, d.colormap);
@@ -539,6 +597,7 @@ impl RfaApp {
             self.set_dab_channel(list[j].name.to_string());
             return;
         }
+        // snap to the step grid, then move n steps (integer division truncates down)
         let step = self.s.step(self.s.mode) as i64;
         let f = (self.s.channel_freq as i64 / step + n as i64) * step;
         self.set_channel(f.max(0) as u64);
@@ -642,6 +701,8 @@ impl RfaApp {
         }
     }
 
+    /// Advances the DAB scan (once per frame). Reads the latest DAB state snapshot, moves
+    /// through the phases with timeouts, logs a line per channel and saves found ensembles.
     fn scan_step(&mut self) {
         let Some(scan) = self.scan.as_mut() else { return };
         let now = self.start_time.elapsed().as_secs_f64();
@@ -709,6 +770,8 @@ impl RfaApp {
             scan_log_line(&format!("{n}{diag}"));
             self.scan_state.log.push(n);
         }
+        // `scan` (a &mut into self.scan) can't be held across the self.* calls above, so it is
+        // borrowed again here
         if next {
             let scan = self.scan.as_mut().unwrap();
             scan.index += 1;
@@ -951,6 +1014,9 @@ impl RfaApp {
                     ui.checkbox(&mut self.s.display.dark, "Dark theme");
                     ui.add(egui::Slider::new(&mut self.s.display.ui_scale, 0.8..=2.5).text("UI scale"));
                     ui.separator();
+                    if ui.button("FM stations (scan and presets)").clicked() {
+                        self.show_fm_window = true;
+                    }
                     if ui.button("Keyboard and mouse help").clicked() {
                         self.show_help = true;
                     }
@@ -1044,6 +1110,8 @@ impl RfaApp {
         }
     }
 
+    /// Sets the dB range from the latest spectrum: 20th percentile (noise) − 10 dB to the
+    /// 99.9th percentile (peaks, ignoring a few outlier bins) + 10 dB.
     pub fn autoscale(&mut self) {
         if self.view.latest.is_empty() {
             return;
@@ -1092,6 +1160,15 @@ impl eframe::App for RfaApp {
         self.autosave_settings();
         self.scan_step();
         self.auto_scan_step();
+        if self.auto_fm_scan && self.now() >= self.auto_next_at && self.auto_next_at > 0.0 {
+            self.auto_fm_scan = false;
+            self.auto_next_at = 0.0;
+            self.start_fm_scan();
+        }
+        self.fm_scan_step();
+        if self.fm_scan.is_some() || self.auto_fm_scan {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         if self.auto_next_at < 0.0 && self.scan.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -1099,6 +1176,11 @@ impl eframe::App for RfaApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
+        // minimized (0x0): keep the radio running but don't lay out panels in no space
+        let r = ctx.content_rect();
+        if r.width() < 200.0 || r.height() < 150.0 {
+            return;
+        }
         egui::Panel::top("top").frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(10, 8))).show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         if self.s.show_side_panel {

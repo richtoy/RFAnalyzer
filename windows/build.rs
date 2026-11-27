@@ -1,5 +1,11 @@
 // Builds the DAB/DAB+ decoder (dab-cmdline + faad2 + KISS FFT from ../nativedab, with this fork's
 // fixes) into a static library, plus the C API in native/dab_capi.cpp.
+//
+// Cargo runs this before compiling the crate. It uses the `cc` crate to compile the C/C++
+// sources with the target's compiler (MinGW gcc/g++ for x86_64-pc-windows-gnu) and prints
+// `cargo:` lines that tell rustc what to link. Two optional parts, by cargo feature:
+// * `dab`: faad2 + dab-cmdline + the C API → libdab_rfa / libdab_rfa_c / libfaad_rfa
+// * `static-sdr`: librtlsdr + libhackrf → libsdr_rfa (libusb comes from the libusb1-sys crate)
 use std::path::{Path, PathBuf};
 
 fn main() {
@@ -35,7 +41,9 @@ fn main() {
         }
     }
 
-    // dab-cmdline sources, as listed in nativedab's CMakeLists.txt
+    // dab-cmdline sources, as listed in nativedab's CMakeLists.txt: find the
+    // `set(DAB_SOURCES` block, take the lines up to its closing ')', expand ${DAB} → "dab".
+    // Reading the list from the Android build keeps both builds in step.
     let cmake = std::fs::read_to_string(root.join("CMakeLists.txt")).unwrap();
     let start = cmake.find("set(DAB_SOURCES").unwrap();
     let block = &cmake[start..];
@@ -110,6 +118,7 @@ fn build_sdr_libs() {
     let hrf = canon(&base.join("libhackrf/src/main/cpp/libhackrf")).expect("libhackrf sources");
     println!("cargo:rerun-if-changed={}", rtl.display());
     println!("cargo:rerun-if-changed={}", hrf.display());
+    // libusb1-sys (links = "usb-1.0") exports its include path to dependents as DEP_USB_1.0_INCLUDE
     let usb_inc = std::env::var("DEP_USB_1.0_INCLUDE").expect("libusb include dir from libusb1-sys");
     let mut b = cc::Build::new();
     b.warnings(false)

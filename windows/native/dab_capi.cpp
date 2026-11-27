@@ -1,6 +1,14 @@
 /*
  * C API over the nativedab DabBridge (../nativedab/src/main/cpp) for the Windows RF Analyzer.
  * License: GPL-2.0-or-later.
+ *
+ * Rust can only call plain C functions, so each DabBridge method gets a C wrapper that takes the
+ * bridge as an opaque `void *` handle (created by rfa_dab_create, freed by rfa_dab_destroy).
+ * Memory rules: input buffers belong to the caller and are only read during the call. Strings
+ * and slides returned to Rust are malloc'd copies that Rust frees with rfa_dab_free, so the
+ * C++ objects never hand out pointers into their own storage.
+ * DabBridge runs the decoder on its own threads and does its own locking; these wrappers are
+ * called from the Rust engine thread only.
  */
 #include "dab_bridge.h"
 #include <cstdlib>
@@ -15,7 +23,9 @@ void rfa_dab_destroy(void *h) { delete static_cast<DabBridge *>(h); }
 void rfa_dab_start(void *h) { static_cast<DabBridge *>(h)->start(); }
 void rfa_dab_stop(void *h) { static_cast<DabBridge *>(h)->stop(); }
 
-/* Interleaved complex float samples. Returns the number dropped (buffer full). */
+/* Interleaved complex float samples. Returns the number dropped (buffer full).
+ * DabBridge wants separate I and Q arrays, so de-interleave into scratch vectors that persist
+ * per thread (thread_local) to avoid an allocation on every call. */
 int rfa_dab_push(void *h, const float *iq, int n) {
     static thread_local std::vector<float> re, im;
     if ((int) re.size() < n) { re.resize(n); im.resize(n); }
@@ -47,6 +57,7 @@ int rfa_dab_take_slide(void *h, uint8_t **data, int *size, int *type, char *name
     std::string n;
     int t = 0;
     if (!static_cast<DabBridge *>(h)->takeSlide(d, n, t)) return 0;
+    /* malloc(0) may return NULL, so always allocate at least one byte */
     *data = (uint8_t *) malloc(d.size() ? d.size() : 1);
     memcpy(*data, d.data(), d.size());
     *size = (int) d.size();
@@ -58,6 +69,7 @@ int rfa_dab_take_slide(void *h, uint8_t **data, int *size, int *type, char *name
     return 1;
 }
 
+/* Writes up to max_points (x, y) pairs into out[0 .. 2*max_points); returns the count. */
 int rfa_dab_poll_constellation(void *h, float *out, int max_points) {
     return static_cast<DabBridge *>(h)->pollConstellation(out, max_points);
 }

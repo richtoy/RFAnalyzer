@@ -1,4 +1,9 @@
 //! RTL-SDR through rtlsdr.dll (librtlsdr; the RTL-SDR Blog build supports the V4).
+//!
+//! The library is normally linked statically (feature `static-sdr`, built by build.rs); the
+//! DLL loader path remains for builds without it. Either way the functions end up in an
+//! [`Api`] table of function pointers, so the rest of the code doesn't care which.
+//! Reading uses `rtlsdr_read_sync` in a loop on our own thread.
 
 #[allow(unused_imports)]
 use super::{convert_u8, hw_freq, load_library, IqBlock, SendPtr, Source};
@@ -9,8 +14,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+/// Opaque `rtlsdr_dev_t*` handle.
 type Dev = *mut c_void;
 
+/// librtlsdr entry points as function pointers. `_lib` keeps a dynamically loaded DLL alive
+/// for as long as the pointers are in use (None when statically linked).
 struct Api {
     _lib: Option<libloading::Library>,
     get_device_count: unsafe extern "C" fn() -> u32,
@@ -84,6 +92,8 @@ impl Api {
     fn load() -> Result<Api, String> {
         let lib = load_library(&["rtlsdr.dll", "librtlsdr.dll", "librtlsdr.so.0", "librtlsdr.so"])?;
         unsafe {
+            // sym!("name") looks up a NUL-terminated symbol and copies out the function
+            // pointer; `?` returns a readable error if it's missing
             macro_rules! sym {
                 ($name:literal) => {
                     *lib.get(concat!($name, "\0").as_bytes()).map_err(|e| format!("rtlsdr.dll: missing {}: {e}", $name))?
@@ -129,10 +139,14 @@ pub fn list_devices() -> Vec<String> {
 }
 
 pub struct RtlSdrSource {
+    /// Shared with the reader thread (Arc) so it can call read_sync.
     api: Arc<Api>,
     dev: SendPtr,
+    /// Last applied settings, to send only what changes in `apply`.
     cfg: SourceConfig,
+    /// Supported tuner gains, tenths of dB.
     gains: Vec<i32>,
+    /// Shared with the reader thread (see rtltcp.rs for the same pattern).
     running: Arc<AtomicBool>,
     freq: Arc<AtomicU64>,
     rate: Arc<AtomicU32>,
@@ -159,6 +173,7 @@ impl RtlSdrSource {
                 let p = (api.get_device_name)(idx);
                 if p.is_null() { "RTL-SDR".into() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
             };
+            // C idiom: call once with NULL to get the count, then again with a buffer
             let n_gains = (api.get_tuner_gains)(dev, std::ptr::null_mut());
             let mut gains = vec![0 as c_int; n_gains.max(0) as usize];
             if n_gains > 0 {
@@ -235,6 +250,8 @@ impl Source for RtlSdrSource {
                         let len = ((r as usize * 2 / 20) / 16384).clamp(1, 32) * 16384;
                         let mut raw = vec![0u8; len];
                         let mut n_read: c_int = 0;
+                        // blocking read straight into the Vec's buffer; n_read = bytes filled.
+                        // 50 consecutive failures (~0.5 s) = device gone; end the thread
                         let res = unsafe { (api.read_sync)(dev.0, raw.as_mut_ptr() as *mut c_void, len as c_int, &mut n_read) };
                         if res < 0 || n_read <= 0 {
                             errors += 1;

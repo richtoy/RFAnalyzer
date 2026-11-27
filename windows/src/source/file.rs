@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 pub struct FileSource {
     cfg: SourceConfig,
+    /// Shared with the reader thread; set false to make it exit.
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -23,6 +24,7 @@ pub fn parse_file_name(name: &str) -> (Option<u64>, Option<u32>, Option<FileForm
     let fmt = std::path::Path::new(&lower).extension().and_then(|e| e.to_str()).and_then(FileFormat::from_ext);
     let mut freq = None;
     let mut rate = None;
+    // split the name into tokens and recognise "<number>[k|m]hz" and "<number>[k|m]sps"
     for part in lower.split(|c: char| c == '_' || c == '-' || c == ' ' || c == '.') {
         if let Some(v) = part.strip_suffix("hz") {
             if let Some(k) = v.strip_suffix('k') {
@@ -67,12 +69,15 @@ impl Source for FileSource {
             std::thread::Builder::new()
                 .name("file-rx".into())
                 .spawn(move || {
+                    // 50 ms blocks, like a real device would deliver
                     let block_samples = (rate as usize / 20).max(1024);
                     let block_bytes = block_samples * fmt.bytes_per_sample();
                     let start = Instant::now();
                     let mut sent: u64 = 0;
                     while running.load(Ordering::Relaxed) {
                         let mut raw = vec![0u8; block_bytes];
+                        // read() may return less than asked; loop until the block is full,
+                        // rewinding at end of file when looping
                         let mut got = 0;
                         while got < block_bytes {
                             match rd.read(&mut raw[got..]) {
@@ -89,6 +94,7 @@ impl Source for FileSource {
                         if got == 0 {
                             break;
                         }
+                        // drop a trailing partial sample
                         raw.truncate(got - got % fmt.bytes_per_sample());
                         let mut samples = Vec::new();
                         convert(fmt, &raw, &mut samples);
@@ -96,7 +102,8 @@ impl Source for FileSource {
                         if tx.send(IqBlock { samples, raw, frequency: freq, rate }).is_err() {
                             break;
                         }
-                        // pace to real time
+                        // pace to real time: sleep until wall-clock time catches up with the
+                        // amount of signal sent (no drift, since it's measured from the start)
                         let due = Duration::from_secs_f64(sent as f64 / rate as f64);
                         let el = start.elapsed();
                         if due > el {

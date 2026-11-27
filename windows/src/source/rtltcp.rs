@@ -1,4 +1,8 @@
 //! rtl_tcp network source (e.g. rtl_tcp on another PC, or an Android rtl_tcp driver).
+//!
+//! Protocol: on connect the server sends a 12-byte header ("RTL0", tuner type, gain count,
+//! big-endian), then an endless stream of unsigned 8-bit IQ. Control goes the other way as
+//! 5-byte commands: 1 byte command id + a big-endian u32 parameter (see `cmd` calls).
 
 use super::{convert_u8, hw_freq, IqBlock, Source};
 use crate::settings::{FileFormat, SourceConfig};
@@ -10,11 +14,15 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+/// R820T gain steps in tenths of dB (rtl_tcp doesn't report them, so use the common tuner's).
 const R820T_GAINS: [i32; 29] = [0, 9, 14, 27, 37, 77, 87, 125, 144, 157, 166, 197, 207, 229, 254, 280, 297, 328, 338, 364, 372, 386, 402, 421, 434, 439, 445, 480, 496];
 
 pub struct RtlTcpSource {
+    /// Control side of the socket (the reader thread has its own clone for reading).
     stream: TcpStream,
     cfg: SourceConfig,
+    /// Shared with the reader thread: run flag, and the frequency/rate to stamp on blocks,
+    /// updated by `apply` so blocks after a retune carry the new values.
     running: Arc<AtomicBool>,
     freq: Arc<AtomicU64>,
     rate: Arc<AtomicU32>,
@@ -47,6 +55,8 @@ impl RtlTcpSource {
             thread: None,
             tuner,
         };
+        // initial settings: 0x02 rate, 0x09 direct sampling, 0x01 frequency, 0x05 ppm,
+        // 0x08 RTL AGC, 0x03 manual gain mode, 0x04 gain, 0x0e bias tee
         s.cmd(0x02, cfg.sample_rate)?;
         s.cmd(0x09, cfg.rtl_direct_sampling)?;
         s.cmd(0x01, hw_freq(cfg) as u32)?;
@@ -80,6 +90,7 @@ impl Source for RtlTcpSource {
                 .name("rtltcp-rx".into())
                 .spawn(move || {
                     while running.load(Ordering::Relaxed) {
+                        // ~50 ms of 2-byte samples, rounded to 16 KiB, between 16 and 512 KiB
                         let r = rate.load(Ordering::Relaxed);
                         let len = ((r as usize * 2 / 20) / 16384).clamp(1, 32) * 16384;
                         let mut raw = vec![0u8; len];
@@ -101,12 +112,14 @@ impl Source for RtlTcpSource {
 
     fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        // shutting the socket down makes the reader's blocking read_exact fail, so it exits
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }
 
+    /// Sends only the settings that differ from the last applied config.
     fn apply(&mut self, cfg: &SourceConfig) -> Result<(), String> {
         let old = self.cfg.clone();
         if cfg.sample_rate != old.sample_rate {

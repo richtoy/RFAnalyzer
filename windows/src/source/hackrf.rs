@@ -1,4 +1,9 @@
 //! HackRF One through hackrf.dll (libhackrf).
+//!
+//! Unlike the RTL-SDR, libhackrf is callback driven: `hackrf_start_rx` starts libhackrf's own
+//! USB thread, which calls [`rx_callback`] with each filled transfer buffer (signed 8-bit IQ).
+//! The callback converts it and sends an IqBlock. Context reaches the callback through a raw
+//! pointer to a heap-allocated [`RxCtx`] that this struct keeps alive until `stop`.
 
 #[allow(unused_imports)]
 use super::{convert_i8, hw_freq, load_library, IqBlock, SendPtr, Source};
@@ -10,6 +15,8 @@ use std::sync::{Arc, OnceLock};
 
 type Dev = *mut c_void;
 
+/// Mirror of libhackrf's `hackrf_transfer` struct. `#[repr(C)]` gives it the C field layout
+/// so the pointer we get in the callback can be read directly.
 #[repr(C)]
 struct HackrfTransfer {
     device: Dev,
@@ -68,6 +75,8 @@ mod linked {
     fn _t(_: *mut HackrfTransfer) {}
 }
 
+/// The function table, created once per process (hackrf_init must only run once). The
+/// OnceLock caches the Result, so a failed init also isn't retried.
 #[cfg(feature = "static-sdr")]
 fn api() -> Result<&'static Api, String> {
     static API: OnceLock<Result<Api, String>> = OnceLock::new();
@@ -140,20 +149,27 @@ fn api() -> Result<&'static Api, String> {
     .map_err(|e| e.clone())
 }
 
+/// What the C callback needs. Boxed so its address is stable while libhackrf holds it.
 struct RxCtx {
     tx: Sender<IqBlock>,
+    /// Current tuning, stamped on each block (updated by `apply`).
     freq: Arc<AtomicU64>,
     rate: Arc<AtomicU32>,
+    /// Cleared on stop or when the engine has gone; the callback then returns -1, which tells
+    /// libhackrf to stop streaming.
     ok: AtomicBool,
 }
 
+/// Called on libhackrf's USB thread for every received buffer.
 unsafe extern "C" fn rx_callback(t: *mut HackrfTransfer) -> c_int {
     unsafe {
         let t = &*t;
+        // recover our context from the void* we passed to hackrf_start_rx
         let ctx = &*(t.rx_ctx as *const RxCtx);
         if !ctx.ok.load(Ordering::Relaxed) {
             return -1;
         }
+        // the buffer belongs to libhackrf and is reused, so copy the valid bytes out
         let raw = std::slice::from_raw_parts(t.buffer, t.valid_length.max(0) as usize).to_vec();
         let mut samples = Vec::new();
         convert_i8(&raw, &mut samples);
@@ -168,9 +184,11 @@ unsafe extern "C" fn rx_callback(t: *mut HackrfTransfer) -> c_int {
 
 pub struct HackRfSource {
     dev: SendPtr,
+    /// Last applied settings (`apply` only sends differences).
     cfg: SourceConfig,
     freq: Arc<AtomicU64>,
     rate: Arc<AtomicU32>,
+    /// Owns the callback context while streaming; dropped only after hackrf_stop_rx.
     ctx: Option<Box<RxCtx>>,
     desc: String,
 }
@@ -219,6 +237,7 @@ impl HackRfSource {
         let a = api().unwrap();
         unsafe {
             (a.set_sample_rate)(self.dev.0, rate as f64);
+            // analog anti-alias filter at ~75 % of the rate (libhackrf rounds to a supported value)
             let bw = (a.compute_baseband_filter_bw)((rate as f64 * 0.75) as u32);
             (a.set_baseband_filter_bandwidth)(self.dev.0, bw);
         }
@@ -230,6 +249,8 @@ impl Source for HackRfSource {
     fn start(&mut self, tx: Sender<IqBlock>) -> Result<(), String> {
         let a = api()?;
         let ctx = Box::new(RxCtx { tx, freq: self.freq.clone(), rate: self.rate.clone(), ok: AtomicBool::new(true) });
+        // pointer to the boxed value (not the Box); moving the Box into self.ctx below
+        // doesn't move the heap allocation, so the pointer stays valid
         let ptr = &*ctx as *const RxCtx as *mut c_void;
         self.ctx = Some(ctx);
         let r = unsafe { (a.start_rx)(self.dev.0, rx_callback, ptr) };

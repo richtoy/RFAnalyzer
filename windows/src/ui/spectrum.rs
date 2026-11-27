@@ -1,4 +1,17 @@
 //! Spectrum plot and waterfall, with tuning by click, drag, wheel and zoom.
+//!
+//! Waterfall storage: one GPU texture of `wf_w` × WF_ROWS pixels used as a circular buffer.
+//! Each new spectrum frame becomes one row, written with `set_partial` (only that row is
+//! uploaded) at `wf_row`, which moves *up* one row per frame. So reading the texture from
+//! `wf_row` downwards (wrapping at the bottom) gives newest → oldest, and drawing it takes two
+//! textured rectangles: rows wf_row..end at the top of the screen, then rows 0..wf_row below.
+//!
+//! Coordinates: `view()` gives the visible span (centre, width in Hz); zooming only changes
+//! that span, while the data always covers the full sample rate. The closures `x_of`/`f_of`
+//! convert between Hz and screen x, `y_of` between dB and screen y.
+//!
+//! The view never changes settings itself: user input becomes [`Action`]s that `show` returns
+//! and the app applies (tuning, dB range).
 
 use super::colormap;
 use crate::settings::{ColorMap, Mode};
@@ -26,17 +39,25 @@ enum Drag {
 }
 
 pub struct SpectrumView {
+    /// Waterfall texture (circular buffer of rows, see module docs).
     tex: Option<TextureHandle>,
+    /// Waterfall texture width in pixels (bins are max-pooled down to this).
     wf_w: usize,
+    /// Texture row holding the newest line.
     wf_row: usize,
+    /// 256-entry colour lookup table for the current colour map.
     cmap: Vec<Color32>,
     cmap_kind: Option<ColorMap>,
+    /// Latest spectrum (dB per bin) and the decaying peak-hold trace.
     pub latest: Vec<f32>,
     peak: Vec<f32>,
+    /// Centre frequency and sample rate of the latest frame (the full data span).
     pub center: f64,
     pub rate: f64,
+    /// Zoom/pan; None = full span centred on the data.
     view_center: Option<f64>,
     view_span: Option<f64>,
+    /// What the current mouse drag is doing (decided when the drag starts).
     drag: Drag,
     has_frame: bool,
 }
@@ -101,6 +122,7 @@ impl SpectrumView {
         if self.peak.len() != db.len() {
             self.peak = db.to_vec();
         } else {
+            // peak hold: jump up to a new maximum, otherwise decay 0.05 dB per frame
             for (p, &v) in self.peak.iter_mut().zip(db) {
                 *p = if v > *p { v } else { *p - 0.05 };
             }
@@ -118,6 +140,8 @@ impl SpectrumView {
         let range = (db_max - db_min).max(1.0);
         let mut row = Vec::with_capacity(w);
         for x in 0..w {
+            // bins b0..b1 fall into pixel column x; take their maximum so narrow carriers
+            // don't vanish, then map dB to 0..1 and look up the colour
             let b0 = x * n / w;
             let b1 = ((x + 1) * n / w).max(b0 + 1).min(n);
             let v = db[b0..b1].iter().copied().fold(f32::MIN, f32::max);
@@ -132,6 +156,7 @@ impl SpectrumView {
         }
     }
 
+    /// Visible (centre, span) in Hz, clamped so the view stays inside the data.
     fn view(&self) -> (f64, f64) {
         let span = self.view_span.unwrap_or(self.rate).min(self.rate);
         let lo_lim = self.center - self.rate / 2.0 + span / 2.0;
@@ -193,6 +218,7 @@ impl SpectrumView {
             let band_lo = self.center - self.rate / 2.0;
             let cols = plot.width().max(1.0) as usize;
             let bin_of = |f: f64| ((f - band_lo) / self.rate * n as f64).clamp(0.0, n as f64 - 1.0);
+            // one point per screen column: the max of the bins under that column
             let curve = |data: &[f32]| -> Vec<Pos2> {
                 let mut pts = Vec::with_capacity(cols + 1);
                 for c in 0..=cols {
@@ -207,6 +233,8 @@ impl SpectrumView {
             let pts = curve(&self.latest);
             let line_col = if dark { Color32::from_rgb(120, 200, 255) } else { Color32::from_rgb(20, 90, 180) };
             if p.fill {
+                // filled area under the curve as a triangle strip: for each point a vertex on
+                // the curve (index 2i) and one at the bottom (2i+1); two triangles per column
                 let mut mesh = Mesh::default();
                 let top_col = if dark { Color32::from_rgba_unmultiplied(80, 160, 230, 120) } else { Color32::from_rgba_unmultiplied(40, 110, 200, 90) };
                 let bot_col = Color32::from_rgba_unmultiplied(40, 80, 140, 10);
@@ -229,6 +257,8 @@ impl SpectrumView {
 
             // waterfall
             if let Some(tex) = &self.tex {
+                // texture coordinates: u0..u1 = the zoomed frequency range (0..1 = full span);
+                // r = the newest row's position, where the circular buffer is split in two
                 let u0 = ((f_lo - band_lo) / self.rate) as f32;
                 let u1 = ((f_lo + span - band_lo) / self.rate) as f32;
                 let r = self.wf_row as f32 / WF_ROWS as f32;
@@ -373,6 +403,7 @@ impl SpectrumView {
                         let k = 1.0 / zoom;
                         actions.push(Action::SetDbRange(at - (at - p.db_min) * k, at + (p.db_max - at) * k));
                     } else {
+                        // zoom around the pointer: keep the frequency under it at the same x
                         let at = f_of(pos.x);
                         let new_span = (span / zoom as f64).clamp(self.rate / 512.0, self.rate);
                         let frac = ((pos.x - plot.left()) / plot.width()) as f64;
@@ -402,6 +433,7 @@ impl SpectrumView {
     }
 }
 
+/// Rounds a grid spacing up to 1, 2, 2.5 or 5 × a power of ten.
 fn nice_step(raw: f64) -> f64 {
     let exp = raw.log10().floor();
     let base = 10f64.powf(exp);
