@@ -1673,6 +1673,51 @@ class MainViewModel @Inject constructor(
         showBookmarkManagerTutorial = { navigate(AppScreen.BookmarksTutorial) }
     )
 
+    /**
+     * Richard's fork: how the FM band scan (LocalFmScan) drives the radio. Survey windows set the
+     * source frequency directly (like a drag of the view would); stations and presets are tuned
+     * through the Tuner in WFM, with Stereo & RDS switched on (the local RDS decoder needs it).
+     */
+    private val fmScanRadio = object : com.mantz_it.rfanalyzer.addon.fm.LocalFmScan.Radio {
+        private val asr get() = appStateRepository
+        override fun sampleRate(): Long = asr.sourceSampleRate.value
+        override fun isFileSource(): Boolean = asr.sourceType.value == SourceType.FILESOURCE
+        override fun isRunning(): Boolean = asr.analyzerRunning.value
+        override fun channelFrequency(): Long = asr.channelFrequency.value
+
+        private fun wfm(label: String, frequencyHz: Long) = TuneTarget(
+            label, DemodulationMode.WFM, frequencyHz, DemodulationMode.WFM.defaultChannelWidth,
+            params = { demodulationWfmStereoAndRdsEnabled.set(true) },
+        )
+
+        override fun prepare() {
+            val ch = asr.channelFrequency.value
+            val f = if (asr.demodulationMode.value == DemodulationMode.WFM && ch in 87_500_000L..108_000_000L) ch else 87_500_000L
+            tuner.tune(wfm("FM scan", f)) { startAnalyzerAfterTuneTo() }
+        }
+
+        override fun tuneSurvey(sourceHz: Long, channelHz: Long) {
+            val src = sourceHz.coerceIn(asr.sourceMinimumFrequency.value, asr.sourceMaximumFrequency.value)
+            asr.sourceFrequency.set(src)
+            asr.viewportFrequency.set(src)
+            asr.viewportSampleRate.set(asr.sourceSampleRate.value)
+            asr.channelFrequency.set(channelHz)
+        }
+
+        override fun tuneChannel(frequencyHz: Long) {
+            val label = com.mantz_it.rfanalyzer.addon.fm.LocalFmScan.presetAt(frequencyHz)?.label()
+                ?: String.format(java.util.Locale.US, "%.1f MHz", frequencyHz / 1e6)
+            tuner.tune(wfm(label, frequencyHz)) { startAnalyzerAfterTuneTo() }
+        }
+
+        override fun snapshot(): () -> Unit {
+            val mode = asr.demodulationMode.value.takeIf { it != DemodulationMode.OFF } ?: DemodulationMode.WFM
+            val ch = asr.channelFrequency.value
+            val width = asr.channelWidth.value
+            return { tuner.tune(TuneTarget("Back", mode, ch, width)) }
+        }
+    }
+
     init {
         Log.d(TAG, "init: MainViewModel initializing...")
 
@@ -1682,6 +1727,8 @@ class MainViewModel @Inject constructor(
                 startAnalyzerAfterTuneTo()
             }
         }
+        // Richard's fork: the FM band scan and the FM presets tune through the Tuner too (LocalFmScan).
+        com.mantz_it.rfanalyzer.addon.fm.LocalFmScan.radio = fmScanRadio
 
         // The Digital tab's shown mode follows the tuned digital mode (DigitalFilter): set while
         // unset and on every real mode change, so a mode picked in between lasts until the next
