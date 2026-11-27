@@ -705,6 +705,8 @@ pub struct GroupParser {
     long_ps_mask: u8,
     /// Per other-network PI: (PS segment mask, PS chars, announced AF count).
     eon_ps_mask: HashMap<u16, (u8, [char; 8], usize)>,
+    /// A PI seen once that differs from `st.pi`, waiting for a second group to confirm it.
+    pi_candidate: Option<u16>,
 }
 
 impl GroupParser {
@@ -726,6 +728,7 @@ impl GroupParser {
             long_ps: [0x20; 32],
             long_ps_mask: 0,
             eon_ps_mask: HashMap::new(),
+            pi_candidate: None,
         }
     }
 
@@ -737,13 +740,22 @@ impl GroupParser {
     /// 1 = B), 10 TP, 9..5 PTY, 4..0 type-specific.
     pub fn parse(&mut self, g: [u16; 4]) {
         let [a, b, c, d] = g;
-        // a new PI means a different station: start from scratch, but keep the group counts
+        // A new PI means a different station: start from scratch, but keep the group counts.
+        // It is only believed when two groups in a row carry it: on a weak signal the burst
+        // corrector can turn a damaged block A into a wrong but valid-looking PI (seen: 8E07
+        // instead of 8201 at 61 % BLER), and one such group must neither be reported nor wipe
+        // the station's PS and RT. The unconfirmed group itself is dropped.
         if self.st.pi != Some(a) {
+            if self.pi_candidate != Some(a) {
+                self.pi_candidate = Some(a);
+                return;
+            }
             let counts = std::mem::take(&mut self.st.group_counts);
             self.reset();
             self.st.group_counts = counts;
             self.st.pi = Some(a);
         }
+        self.pi_candidate = None;
         let typ = (b >> 12) as u8;
         let version_a = (b >> 11) & 1 == 0;
         let name = format!("{}{}", typ, if version_a { 'A' } else { 'B' });
@@ -1183,6 +1195,26 @@ mod tests {
         assert_eq!(parser.st.ps, "NPO 2   ");
         assert_eq!(parser.st.pi, Some(0x8201));
         assert_eq!(parser.st.pty, Some(10));
+    }
+
+    #[test]
+    fn single_wrong_pi_is_ignored() {
+        let mut parser = GroupParser::new();
+        for g in ps_groups(0x8201, "NPO R1  ").into_iter().chain(ps_groups(0x8201, "NPO R1  ")) {
+            parser.parse(g);
+        }
+        assert_eq!(parser.st.pi, Some(0x8201));
+        // one group with a miscorrected PI: not taken, and the PS survives
+        let mut bad = ps_groups(0x8E07, "NPO R1  ")[0];
+        bad[0] = 0x8E07;
+        parser.parse(bad);
+        assert_eq!(parser.st.pi, Some(0x8201));
+        assert_eq!(parser.st.ps, "NPO R1  ");
+        // a real change of station (the same new PI twice in a row) is taken
+        for g in ps_groups(0x8E07, "OTHER   ") {
+            parser.parse(g);
+        }
+        assert_eq!(parser.st.pi, Some(0x8E07));
     }
 
     #[test]

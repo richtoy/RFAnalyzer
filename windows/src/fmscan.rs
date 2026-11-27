@@ -17,8 +17,8 @@
 //!    floor (the 20th-percentile level).
 //! 3. **Verify**: each candidate is tuned in WFM for a few seconds while [`Track`] watches PS
 //!    and RadioText settle and the pilot detector reports stereo. The result is an
-//!    [`FmPreset`]. Strong carriers with no RDS also get their ±1 step neighbours tried, since
-//!    the survey's peak can be one channel off.
+//!    [`FmPreset`]. Strong carriers with no RDS also get their stronger neighbour channel tried
+//!    for 3 s, since the survey's peak can be one channel off.
 //! 4. **Finish**: duplicates of a PI are marked (`mark_same_pi`), user-given names are carried
 //!    over from the old list, and the list replaces `settings.fm_presets` (saved to disk).
 //!
@@ -155,8 +155,12 @@ pub struct Track {
     /// The PS at the previous observation and when it took that value.
     last_ps: String,
     last_ps_since: f64,
-    /// stable PS values in order of appearance, with how long each was seen
-    ps_seen: Vec<(String, f64)>,
+    /// stable PS values in order of appearance: (page, seconds seen, episodes). An episode is
+    /// one stretch in which the page became stable; the pages of a scrolling PS come back
+    /// every cycle, a garbled read normally only once.
+    ps_seen: Vec<(String, f64, u32)>,
+    /// The current `last_ps` stretch has already been counted as an episode.
+    ps_counted: bool,
     /// Same idea for RadioText; `rt` is the last value that stayed for ≥ 1.5 s.
     last_rt: String,
     last_rt_since: f64,
@@ -182,10 +186,18 @@ impl Track {
             if ps == self.last_ps {
                 if t - self.last_ps_since >= 1.0 {
                     // find this page's entry (iter_mut gives &mut to the tuple) or add it
-                    match self.ps_seen.iter_mut().find(|(p, _)| p == ps) {
-                        Some(e) => e.1 += dt,
+                    // the first stable poll of a stretch starts a new episode
+                    let first = !self.ps_counted;
+                    self.ps_counted = true;
+                    match self.ps_seen.iter_mut().find(|(p, _, _)| p == ps) {
+                        Some(e) => {
+                            e.1 += dt;
+                            if first {
+                                e.2 += 1;
+                            }
+                        }
                         None => {
-                            self.ps_seen.push((ps.to_string(), dt));
+                            self.ps_seen.push((ps.to_string(), dt, 1));
                             new_stable = true;
                         }
                     }
@@ -193,6 +205,7 @@ impl Track {
             } else {
                 self.last_ps = ps.to_string();
                 self.last_ps_since = t;
+                self.ps_counted = false;
             }
         }
         if rt.chars().count() >= 4 {
@@ -216,20 +229,22 @@ impl Track {
             _ => {
                 // Several stable pages: a scrolling PS (or garbled reads). Keep, in order of
                 // appearance, the pages that
-                // * were seen for at least 30 % of the longest page's time (one-off reads go),
+                // * came back at least twice, or were seen for at least 30 % of the longest
+                //   page's time (one-off reads go; a short page such as "KLASSIEK" after a
+                //   long "NPO" survives because it recurs every cycle),
                 // * are not a stitch of segments from pages seen longer (is_mixed_page), and
                 // * are not within 2 characters of a page seen longer (corrupted copies).
                 let best = self.ps_seen.iter().map(|x| x.1).fold(0.0, f64::max);
                 let pages: Vec<&str> = self
                     .ps_seen
                     .iter()
-                    .filter(|(p, secs)| {
-                        if *secs < 0.3 * best {
+                    .filter(|(p, secs, eps)| {
+                        if *secs < 0.3 * best && *eps < 2 {
                             return false;
                         }
                         // pages seen longer than this one (ties don't count, so two real
                         // pages of equal time can't knock each other out)
-                        let longer: Vec<&str> = self.ps_seen.iter().filter(|(q, s)| q != p && *s > *secs).map(|(q, _)| q.as_str()).collect();
+                        let longer: Vec<&str> = self.ps_seen.iter().filter(|(q, s, _)| q != p && *s > *secs).map(|(q, _, _)| q.as_str()).collect();
                         !is_mixed_page(p, &longer) && !longer.iter().any(|q| ps_distance(p, q) <= 2)
                     })
                     .map(|x| x.0.trim())
@@ -594,7 +609,7 @@ impl RfaApp {
                 // weak carriers get longer to show RDS: they are often distant transmitters
                 let snr = sc.levels[sc.candidates[*index]] - sc.floor_db;
                 let no_rds_wait: f64 = if alts.is_some() {
-                    4.0 // a neighbour of a carrier: a quick look is enough
+                    3.0 // a neighbour of a carrier: a quick look is enough (a PI shows within ~1 s)
                 } else if snr >= 15.0 {
                     7.0
                 } else if snr >= 11.0 {
@@ -657,9 +672,16 @@ impl RfaApp {
                 // a strong carrier without RDS may be a station whose peak the survey placed one step
                 // off (seen on the HackRF): listen on the neighbouring channels before giving up
                 if !p.rds && alts.is_none() && snr >= 12.0 {
-                    let step = sc.cfg.step_hz.max(10_000);
+                    // Only the stronger neighbour: a peak placed one step off has its true centre on
+                    // the side where the measured level is higher. One try instead of two keeps a
+                    // carrier without RDS to about 10 s instead of 15.
+                    let k = sc.candidates[*index];
                     let taken: Vec<u64> = sc.candidates.iter().map(|&i| sc.grid[i]).collect();
-                    let v: Vec<u64> = [f + step, f.saturating_sub(step)]
+                    let lvl = |j: Option<usize>| j.and_then(|j| sc.levels.get(j).copied()).unwrap_or(f32::NEG_INFINITY);
+                    let (below, above) = (k.checked_sub(1), Some(k + 1).filter(|&j| j < sc.grid.len()));
+                    let side = if lvl(above) >= lvl(below) { above } else { below };
+                    let v: Vec<u64> = side
+                        .map(|j| sc.grid[j])
                         .into_iter()
                         .filter(|g| *g >= sc.cfg.start_hz && *g <= sc.cfg.end_hz && !taken.contains(g))
                         .collect();
@@ -858,10 +880,10 @@ mod tests {
         // the 30 % rule on time alone
         let mut tr = Track::default();
         tr.ps_seen = vec![
-            ("RADIO 2 ".into(), 6.0),
-            ("RADIR2  ".into(), 2.0), // RA DI from page 1, R2 and blanks from page 2
-            ("NPO R2  ".into(), 4.0),
-            ("RAO O 2 ".into(), 2.5), // 2 characters off "RADIO 2 "
+            ("RADIO 2 ".into(), 6.0, 3),
+            ("RADIR2  ".into(), 2.0, 2), // RA DI from page 1, R2 and blanks from page 2
+            ("NPO R2  ".into(), 4.0, 3),
+            ("RAO O 2 ".into(), 2.5, 2), // 2 characters off "RADIO 2 "
         ];
         assert_eq!(tr.name(), "RADIO 2 NPO R2");
         assert!(is_mixed_page("KLO     ", &["NPO     ", "KLASSIEK"]));
@@ -891,6 +913,19 @@ mod tests {
             tr.observe(t, ps, "");
         }
         assert_eq!(tr.name(), "NPO R1 RADIO 1");
+    }
+
+    #[test]
+    fn short_recurring_page_is_kept() {
+        // "NPO" shows 5 s, "KLASSIEK" only 1.6 s per cycle: its stable time (0.6 s a cycle,
+        // after the 1 s settle) is far under 30 % of NPO's, but it comes back every cycle
+        let mut tr = Track::default();
+        for i in 0..400 {
+            let t = i as f64 * 0.05;
+            let ps = if t % 6.6 < 5.0 { "NPO     " } else { "KLASSIEK" };
+            tr.observe(t, ps, "");
+        }
+        assert_eq!(tr.name(), "NPO KLASSIEK");
     }
 
     #[test]
