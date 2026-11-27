@@ -112,6 +112,15 @@ impl AudioOut {
     fn open_here(shared: Arc<AudioShared>, wanted: &str) -> Result<(cpal::Stream, String, u32), String> {
         let host = cpal::default_host();
         let mut device = None;
+        // "System default": open the concrete endpoint that is currently the default. cpal's virtual
+        // default device activates asynchronously, which keeps failing with RPC_E_CHANGED_MODE after
+        // sleep/wake, while activating the named endpoint works.
+        let default_name = if wanted.is_empty() {
+            host.default_output_device().and_then(|d| d.description().ok().map(|x| x.name().to_string()))
+        } else {
+            None
+        };
+        let wanted = default_name.as_deref().unwrap_or(wanted);
         if !wanted.is_empty() {
             if let Ok(devs) = host.output_devices() {
                 for d in devs {
