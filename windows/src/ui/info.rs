@@ -1,4 +1,10 @@
 //! The info panel on the right (RDS for FM, the DAB+ receiver) and the detail windows.
+//!
+//! Everything here only reads the snapshots `RfaApp` copied from the engine this frame
+//! (`self.rds`, `self.rds_stats`, `self.fm`, `self.dab`) and draws them; user choices (a DAB
+//! service, a preset) go back through `RfaApp` methods that send engine commands.
+//! Small custom plots (CU map, sparkline, MPX spectrum, symbols, constellation) are drawn
+//! directly with egui's painter: allocate a rectangle, then map data values into it.
 
 use crate::app::RfaApp;
 use crate::dab::model::{self, language_name, pty_name, DabState};
@@ -303,7 +309,8 @@ impl RfaApp {
         };
         ui.label(RichText::new(&svc.label).size(26.0).strong());
         ui.label(RichText::new(format!("{} · {} kbps · {} · {}", svc.codec(), svc.bitrate, svc.protection(), pty_name(svc.pty))).weak());
-        // slideshow
+        // slideshow: decoding the JPEG/PNG and uploading a GPU texture is costly, so it is
+        // done only when `slide_serial` changes; the texture is cached with that serial
         if let Some(slide) = &d.slide {
             let serial = d.slide_serial;
             if self.slide_tex.as_ref().map(|(s, _)| *s) != Some(serial) {
@@ -470,6 +477,9 @@ fn dab_ensemble_page(ui: &mut egui::Ui, d: &DabState) {
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 4.0, Color32::from_gray(40));
+    // one entry per subchannel, in multiplex order. dedup_by_key removes *consecutive*
+    // duplicates, which works because services sharing a subchannel share its start CU and
+    // are therefore adjacent after the sort.
     let mut subs: Vec<_> = d.services.iter().filter(|s| s.subch >= 0).collect();
     subs.sort_by_key(|s| s.start_cu);
     subs.dedup_by_key(|s| s.subch);
@@ -485,6 +495,7 @@ fn dab_ensemble_page(ui: &mut egui::Ui, d: &DabState) {
     ];
     let mut hovered = None;
     for (i, s) in subs.iter().enumerate() {
+        // the bar spans the 864 CUs of the main service channel
         let x0 = rect.left() + s.start_cu as f32 / 864.0 * rect.width();
         let x1 = rect.left() + (s.start_cu + s.length_cu) as f32 / 864.0 * rect.width();
         let r = egui::Rect::from_min_max(pos2(x0, rect.top()), pos2(x1.max(x0 + 1.0), rect.bottom()));
@@ -575,6 +586,7 @@ fn dab_signal_page(ui: &mut egui::Ui, d: &DabState) {
     }
 }
 
+/// A small line graph of `data` (oldest left), values mapped from lo..hi to bottom..top.
 fn sparkline(ui: &mut egui::Ui, data: &[f32], lo: f32, hi: f32, label: &str, invert_good: bool) {
     let w = ui.available_width().min(500.0);
     let (rect, _) = ui.allocate_exact_size(vec2(w, 50.0), Sense::hover());
@@ -597,6 +609,8 @@ fn sparkline(ui: &mut egui::Ui, data: &[f32], lo: f32, hi: f32, label: &str, inv
     p.text(rect.left_top() + vec2(4.0, 2.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(11.0), Color32::from_gray(160));
 }
 
+/// MPX spectrum 0..96 kHz (the engine sends the positive half of the FFT), with markers at
+/// the pilot (19), stereo subcarrier (38) and RDS (57 kHz).
 fn mpx_view(ui: &mut egui::Ui, db: &[f32]) {
     let w = ui.available_width().min(600.0);
     let (rect, _) = ui.allocate_exact_size(vec2(w, 140.0), Sense::hover());
@@ -624,6 +638,7 @@ fn mpx_view(ui: &mut egui::Ui, db: &[f32]) {
     }
 }
 
+/// Recent RDS matched-filter outputs (normalised). Two clean bands at ±1 = good BPSK.
 fn symbol_view(ui: &mut egui::Ui, sym: &[f32]) {
     let w = ui.available_width().min(600.0);
     let (rect, _) = ui.allocate_exact_size(vec2(w, 70.0), Sense::hover());

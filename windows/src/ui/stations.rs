@@ -1,4 +1,9 @@
 //! The FM stations window: band scan and the presets list with RDS attributes.
+//!
+//! Presets live in `self.s.fm_presets` (so they are saved with the settings). The grid
+//! iterates them with `iter_mut` so the "Your name" text box can edit a preset in place.
+//! Tune and delete clicks can't act during that loop (the list is borrowed), so they are
+//! recorded in `tune` / `delete` and applied after it.
 
 use crate::app::RfaApp;
 use crate::rds::PTY_RDS;
@@ -46,6 +51,8 @@ impl RfaApp {
         }
     }
 
+    /// Tunes the next preset above (dir > 0) or below the current channel, wrapping around.
+    /// The 25 kHz margin skips the preset we're on.
     pub fn step_preset(&mut self, dir: i32) {
         if self.s.fm_presets.is_empty() {
             return;

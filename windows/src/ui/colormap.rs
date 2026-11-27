@@ -3,6 +3,7 @@
 use crate::settings::ColorMap;
 use eframe::egui::Color32;
 
+/// 256-entry lookup table; the waterfall indexes it with (level fraction × 255).
 pub fn build(map: ColorMap) -> Vec<Color32> {
     (0..256).map(|i| color(map, i)).collect()
 }

@@ -1,7 +1,14 @@
-//! Persistent settings (saved by eframe between runs).
+//! Persistent settings, saved to %APPDATA%\RFAnalyzer\settings.json whenever they change
+//! (see `RfaApp::autosave_settings`).
+//!
+//! All structs derive serde's Serialize/Deserialize and most carry `#[serde(default)]`: a
+//! field missing from an older settings file takes its `Default` value instead of failing the
+//! whole load, so new options can be added freely. The enums are stored by variant name.
 
 use serde::{Deserialize, Serialize};
 
+/// Demodulation mode. Each mode's fixed parameters (rate, width limits, tuning steps) are
+/// methods here, so adding a mode means adding a variant and filling in each `match`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum Mode {
     Off,
@@ -94,7 +101,8 @@ impl Mode {
             Mode::Dab => 16_000,
         }
     }
-    /// The channel's extent relative to the channel frequency, for the spectrum overlay.
+    /// The channel's extent relative to the channel frequency, for the spectrum overlay
+    /// (and for the channel power measurement in the engine).
     pub fn passband(self, width: u32) -> (f64, f64) {
         let w = width as f64;
         match self {
@@ -184,10 +192,13 @@ impl FileFormat {
     }
 }
 
+/// Everything about the input. Sent to the engine as a whole (`Cmd::Start` / `Cmd::Source`);
+/// each source compares it with the previous one and applies only the differences.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourceConfig {
     pub kind: SourceKind,
+    /// Centre frequency as displayed (Hz, including `freq_offset`); see `source::hw_freq`.
     pub frequency: u64,
     pub sample_rate: u32,
     /// Added to the displayed frequency (up/down converter), Hz
@@ -202,7 +213,7 @@ pub struct SourceConfig {
     pub rtl_bias_tee: bool,
     /// 0 off, 1 I, 2 Q
     pub rtl_direct_sampling: u32,
-    // HackRF
+    // HackRF: RF amp on/off (+14 dB), LNA 0-40 dB in 8 dB steps, VGA 0-62 dB in 2 dB steps
     pub hackrf_amp: bool,
     pub hackrf_lna: u32,
     pub hackrf_vga: u32,
@@ -299,6 +310,8 @@ pub struct Bookmark {
     pub notes: String,
 }
 
+/// The whole persisted state. The UI edits `RfaApp::s` directly; changes reach the engine
+/// through `RfaApp`'s helpers and are saved by comparing against the last saved copy.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -307,6 +320,8 @@ pub struct Settings {
     pub mode: Mode,
     /// Channel frequency (Hz, as displayed, i.e. including the converter offset)
     pub channel_freq: u64,
+    /// Per-mode channel width and tuning step, keyed by `Mode::name()` ("WFM" → 95000).
+    /// Accessed through `width()` / `step()`, which fall back to the mode's default.
     pub widths: std::collections::HashMap<String, u32>,
     pub steps: std::collections::HashMap<String, u32>,
     pub volume: f32,
@@ -323,8 +338,11 @@ pub struct Settings {
     pub record_stop_sec: u32,
     pub bookmarks: Vec<Bookmark>,
     pub dab_channel: String,
+    /// Ensemble key ("e<id>" / "f<kHz>") → last service played there.
     pub dab_last_service: std::collections::HashMap<String, u32>,
+    /// Ensembles found by the last DAB scan.
     pub dab_ensembles: Vec<crate::dab::model::SavedEnsemble>,
+    /// Stations found by the last FM scan, in frequency order.
     pub fm_presets: Vec<crate::fmscan::FmPreset>,
     pub fm_scan: crate::fmscan::FmScanConfig,
     pub show_side_panel: bool,

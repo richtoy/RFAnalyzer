@@ -1,6 +1,15 @@
 //! RF Analyzer for Windows: a desktop port of Richard's RF Analyzer fork (spectrum/waterfall,
 //! analog demodulation, FM stereo + RDS, DAB/DAB+), for RTL-SDR and HackRF.
 //! License: GPL-2.0-or-later.
+//!
+//! Module map:
+//! * `app` – the egui application object [`app::RfaApp`]: owns settings, talks to the engine,
+//!   runs the DAB/FM scans, draws via `ui`.
+//! * `engine` – the processing thread (source → spectrum, demodulation, audio).
+//! * `dsp` – filters, resampling, demodulators, FFT. `rds` – RDS decoder.
+//! * `dab` – Rust side of the native DAB+ decoder. `fmscan` – FM band scan and presets.
+//! * `source` – RTL-SDR, HackRF, rtl_tcp and IQ file inputs. `audio` – sound output.
+//! * `settings` – everything persisted to settings.json.
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 mod app;
@@ -18,7 +27,6 @@ mod ui;
 #[cfg(feature = "static-sdr")]
 use libusb1_sys as _;
 
-/// %APPDATA%\RFAnalyzer (or ~/.config/rfanalyzer elsewhere), created on demand.
 /// Appends a timestamped line to %APPDATA%\\RFAnalyzer\\rfanalyzer.log (the release build has no
 /// console, so errors would otherwise be lost). Trimmed to the last ~1 MB at startup.
 pub fn log_line(line: &str) {
@@ -29,6 +37,7 @@ pub fn log_line(line: &str) {
     }
 }
 
+/// %APPDATA%\RFAnalyzer (or ~/.config/RFAnalyzer elsewhere), created on demand.
 pub fn config_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA").map(std::path::PathBuf::from).or_else(|| {
         std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))

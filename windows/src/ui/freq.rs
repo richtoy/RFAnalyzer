@@ -2,6 +2,8 @@
 
 use eframe::egui::{self, pos2, vec2, Color32, Rect, Sense, Ui};
 
+/// Draws `freq` as 10 digits (leading zeros dimmed). Returns Some(new frequency) when the
+/// user changed a digit this frame. Digit i is worth 10^(9−i) Hz.
 pub fn frequency_display(ui: &mut Ui, id: &str, freq: u64, digit_h: f32, enabled: bool) -> Option<u64> {
     const DIGITS: usize = 10; // up to 9.999 999 999 GHz
     let digit_w = digit_h * 0.62;

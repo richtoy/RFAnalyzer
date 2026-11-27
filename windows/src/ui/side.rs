@@ -1,4 +1,8 @@
 //! The settings panel on the left: Source, Demodulation, Display, Recording, Bookmarks.
+//!
+//! The widgets edit `self.s` (the settings) in place through `&mut` references. Nothing is
+//! sent from here: at the end of the frame `RfaApp::sync_engine` notices the changed values
+//! and sends the engine the matching commands.
 
 use crate::app::{fmt_hz, RfaApp, SideTab};
 use crate::settings::{Bookmark, ColorMap, FileFormat, Mode, SourceKind};
