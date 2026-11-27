@@ -98,6 +98,11 @@ pub struct RfaApp {
     audio_retry_at: f64,
     next_settings_check: f64,
     saved_settings: String,
+    /// Source stopped by itself (e.g. USB reset after sleep): restart it at this time
+    reconnect_at: Option<f64>,
+    reconnect_tries: u32,
+    audio_watch: (u32, f64),
+    next_default_check: f64,
 }
 
 pub fn icon() -> egui::IconData {
@@ -193,6 +198,10 @@ impl RfaApp {
             audio_retry_at: 0.0,
             next_settings_check: 0.0,
             saved_settings: String::new(),
+            reconnect_at: None,
+            reconnect_tries: 0,
+            audio_watch: (0, 0.0),
+            next_default_check: 5.0,
             s,
         };
         app.engine.send(Cmd::DabRemembered(app.s.dab_last_service.clone()));
@@ -284,11 +293,38 @@ impl RfaApp {
     /// Rebuilds the audio stream after the device changed or went away (WASAPI invalidates it),
     /// retrying every 2 s while it fails.
     fn check_audio(&mut self) {
-        let failed = self.audio.stream_failed.load(std::sync::atomic::Ordering::Relaxed);
+        let mut failed = self.audio.stream_failed.load(std::sync::atomic::Ordering::Relaxed);
+        // a stream that silently stopped calling back (seen after sleep/wake) counts as failed
+        let n = self.audio.callbacks.load(std::sync::atomic::Ordering::Relaxed);
+        let now = self.now();
+        if n != self.audio_watch.0 || self.audio_out.is_none() {
+            self.audio_watch = (n, now);
+        } else if now - self.audio_watch.1 > 3.0 {
+            crate::log_line("audio output stalled (no callbacks for 3 s), reopening");
+            self.audio_watch = (n, now);
+            failed = true;
+        }
+        // "System default" is opened as a concrete device, so follow the default when it changes
+        // (e.g. after wake the monitor's HDMI audio returns a few seconds after the fallback).
+        if self.s.audio_device.is_empty() && now >= self.next_default_check {
+            self.next_default_check = now + 3.0;
+            if let (Some(def), Some(out)) = (crate::audio::default_device_name(), self.audio_out.as_ref()) {
+                if def != out.device_name {
+                    crate::log_line(&format!("default output changed to {def}, reopening"));
+                    failed = true;
+                    self.audio_retry_at = 0.0;
+                }
+            }
+        }
         let missing = self.audio_out.is_none();
         if (failed || missing) && self.now() >= self.audio_retry_at {
             self.audio_retry_at = self.now() + 2.0;
             self.reopen_audio();
+            match &self.audio_error {
+                None => crate::log_line("audio output reopened"),
+                Some(e) if !missing || failed => crate::log_line(&format!("audio reopen failed: {e}")),
+                _ => {}
+            }
         }
     }
 
@@ -391,6 +427,8 @@ impl RfaApp {
     }
 
     pub fn stop(&mut self) {
+        self.reconnect_at = None;
+        self.reconnect_tries = 0;
         self.engine.send(Cmd::Stop);
         self.running = false;
         self.scan = None;
@@ -405,9 +443,24 @@ impl RfaApp {
         let st = self.engine.status.clone();
         let mut st = st.lock();
         let frames: Vec<_> = st.frames.drain(..).collect();
+        let was_running = self.running;
         self.running = st.running || (self.running && st.error.is_none());
         if !st.running && st.error.is_some() {
             self.running = false;
+        }
+        if !st.running && st.error.is_some() {
+            if let Some(e) = &st.error {
+                crate::log_line(&format!("source error: {e}"));
+            }
+            // a live SDR that stops by itself (USB reset on sleep/wake, brief unplug): keep retrying
+            if (was_running || self.reconnect_at.is_some()) && self.s.source.kind != SourceKind::File {
+                self.reconnect_tries += 1;
+                let delay = if self.reconnect_tries <= 5 { 2.0 } else { 5.0 };
+                self.reconnect_at = Some(self.start_time.elapsed().as_secs_f64() + delay);
+            }
+        } else if st.running && self.reconnect_at.is_none() && self.reconnect_tries > 0 && !frames.is_empty() {
+            crate::log_line(&format!("source running again after {} attempt(s)", self.reconnect_tries));
+            self.reconnect_tries = 0;
         }
         if st.error != self.error && st.error.is_some() {
             self.error = st.error.clone();
@@ -1026,6 +1079,16 @@ impl eframe::App for RfaApp {
         self.poll_status(&ctx);
         self.shortcuts(&ctx);
         self.check_audio();
+        if let Some(t) = self.reconnect_at {
+            if self.now() >= t {
+                self.reconnect_at = None;
+                crate::log_line(&format!("reconnecting to the source (attempt {})", self.reconnect_tries));
+                self.start();
+                self.toast(format!("The SDR stopped; reconnecting (attempt {})…", self.reconnect_tries));
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
         self.autosave_settings();
         self.scan_step();
         self.auto_scan_step();
