@@ -102,6 +102,7 @@ pub struct RfaApp {
     reconnect_at: Option<f64>,
     reconnect_tries: u32,
     audio_watch: (u32, f64),
+    next_default_check: f64,
 }
 
 pub fn icon() -> egui::IconData {
@@ -200,6 +201,7 @@ impl RfaApp {
             reconnect_at: None,
             reconnect_tries: 0,
             audio_watch: (0, 0.0),
+            next_default_check: 5.0,
             s,
         };
         app.engine.send(Cmd::DabRemembered(app.s.dab_last_service.clone()));
@@ -301,6 +303,18 @@ impl RfaApp {
             crate::log_line("audio output stalled (no callbacks for 3 s), reopening");
             self.audio_watch = (n, now);
             failed = true;
+        }
+        // "System default" is opened as a concrete device, so follow the default when it changes
+        // (e.g. after wake the monitor's HDMI audio returns a few seconds after the fallback).
+        if self.s.audio_device.is_empty() && now >= self.next_default_check {
+            self.next_default_check = now + 3.0;
+            if let (Some(def), Some(out)) = (crate::audio::default_device_name(), self.audio_out.as_ref()) {
+                if def != out.device_name {
+                    crate::log_line(&format!("default output changed to {def}, reopening"));
+                    failed = true;
+                    self.audio_retry_at = 0.0;
+                }
+            }
         }
         let missing = self.audio_out.is_none();
         if (failed || missing) && self.now() >= self.audio_retry_at {

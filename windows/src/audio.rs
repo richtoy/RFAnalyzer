@@ -76,6 +76,14 @@ pub fn output_device_names() -> Vec<String> {
     std::thread::spawn(device_names_here).join().unwrap_or_default()
 }
 
+/// Name of the current default output endpoint (queried on its own thread, see above).
+pub fn default_device_name() -> Option<String> {
+    std::thread::spawn(|| cpal::default_host().default_output_device().and_then(|d| d.description().ok().map(|x| x.name().to_string())))
+        .join()
+        .ok()
+        .flatten()
+}
+
 fn device_names_here() -> Vec<String> {
     let host = cpal::default_host();
     host.output_devices()
