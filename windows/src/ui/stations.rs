@@ -141,7 +141,7 @@ impl RfaApp {
             let mut tune = None;
             let mut delete = None;
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                egui::Grid::new("fm_presets_grid").striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+                egui::Grid::new("fm_presets_grid").striped(true).spacing([14.0, 2.0]).show(ui, |ui| {
                     for h in ["", "MHz", "PS", "Your name", "PI", "Programme type", "Stereo", "RDS", "TP", "TA", "Country", "Level", "SNR", "BLER", "AF", "Extras", "RadioText", ""] {
                         ui.label(RichText::new(h).strong());
                     }
@@ -153,13 +153,18 @@ impl RfaApp {
                         }
                         ui.label(RichText::new(format!("{:.1}", p.freq as f64 / 1e6)).monospace().strong());
                         ui.label(RichText::new(if p.ps.is_empty() { "—".to_string() } else { p.ps.clone() }).monospace().strong());
-                        ui.add(egui::TextEdit::singleline(&mut p.name).hint_text("optional").desired_width(130.0));
+                        ui.add(egui::TextEdit::singleline(&mut p.name).hint_text("optional").desired_width(150.0));
                         ui.label(RichText::new(p.pi.map(|x| format!("{x:04X}")).unwrap_or_default()).monospace());
                         ui.label(p.pty.map(|x| PTY_RDS.get(x as usize).copied().unwrap_or("").to_string()).unwrap_or_default());
                         flag(ui, p.stereo, if p.stereo { "stereo" } else { "mono" });
                         flag(ui, p.rds, if p.rds { "RDS" } else { "—" });
-                        flag(ui, p.tp, "TP");
-                        flag(ui, p.ta, "TA");
+                        if p.rds {
+                            flag(ui, p.tp, "TP");
+                            flag(ui, p.ta, "TA");
+                        } else {
+                            ui.label("");
+                            ui.label("");
+                        }
                         ui.label(p.country.clone().unwrap_or_else(|| p.ecc.map(|e| format!("ECC {e:02X}")).unwrap_or_default()));
                         ui.label(format!("{:.0} dB", p.level_db));
                         ui.label(format!("{:.0} dB", p.snr_db));

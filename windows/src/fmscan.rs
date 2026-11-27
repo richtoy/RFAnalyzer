@@ -429,7 +429,7 @@ impl RfaApp {
                 // weak carriers get longer to show RDS: they are often distant transmitters
                 let snr = sc.levels[sc.candidates[*index]] - sc.floor_db;
                 let no_rds_wait: f64 = if snr >= 15.0 { 7.0 } else if snr >= 11.0 { 5.0 } else { 3.5 };
-                let done = (!*rds_seen && t >= no_rds_wait.min(max)) || ps_at.map(|p| t >= p + 3.0).unwrap_or(false) || t >= max;
+                let done = (!*rds_seen && t >= no_rds_wait.min(max)) || ps_at.map(|p| t >= p + 4.5).unwrap_or(false) || t >= max;
                 if !done {
                     return false;
                 }
