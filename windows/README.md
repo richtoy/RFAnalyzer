@@ -34,5 +34,10 @@ Cross-compiled from Linux (mingw-w64, posix threads):
     cargo build --release --target x86_64-pc-windows-gnu
 
 build.rs compiles the DAB decoder (`../nativedab`), librtlsdr and libhackrf (from this repo) and
-vendored libusb statically. Features: `dab`, `static-sdr` (both default). Native MSVC builds should
-also work. `cargo test` runs the DSP/RDS/DAB-model unit tests.
+vendored libusb statically. Features: `dab`, `static-sdr` (both default).
+
+Native build on Windows: MSVC does not work (libhackrf needs pthreads), use the GNU toolchain with
+WinLibs MinGW-w64 (POSIX/UCRT): `rustup target add x86_64-pc-windows-gnu`, put WinLibs `bin` first
+on PATH, set `CC_x86_64_pc_windows_gnu=gcc`, `CXX_x86_64_pc_windows_gnu=g++`,
+`AR_x86_64_pc_windows_gnu=ar`, `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc`, then
+`cargo build --release --target x86_64-pc-windows-gnu`. `cargo test` runs the DSP/RDS/DAB-model unit tests.

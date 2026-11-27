@@ -12,7 +12,7 @@ fn main() {
         return;
     }
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../nativedab/src/main/cpp");
-    let root = root.canonicalize().expect("nativedab sources not found (../nativedab/src/main/cpp)");
+    let root = canon(&root).expect("nativedab sources not found (../nativedab/src/main/cpp)");
     println!("cargo:rerun-if-changed={}", root.display());
     let target = std::env::var("TARGET").unwrap();
     let windows = target.contains("windows");
@@ -106,8 +106,8 @@ fn main() {
 /// statically against the libusb that libusb1-sys builds (WinUSB backend on Windows).
 fn build_sdr_libs() {
     let base = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
-    let rtl = base.join("librtlsdr/src/main/cpp/librtlsdr").canonicalize().expect("librtlsdr sources");
-    let hrf = base.join("libhackrf/src/main/cpp/libhackrf").canonicalize().expect("libhackrf sources");
+    let rtl = canon(&base.join("librtlsdr/src/main/cpp/librtlsdr")).expect("librtlsdr sources");
+    let hrf = canon(&base.join("libhackrf/src/main/cpp/libhackrf")).expect("libhackrf sources");
     println!("cargo:rerun-if-changed={}", rtl.display());
     println!("cargo:rerun-if-changed={}", hrf.display());
     let usb_inc = std::env::var("DEP_USB_1.0_INCLUDE").expect("libusb include dir from libusb1-sys");
@@ -124,4 +124,15 @@ fn build_sdr_libs() {
     }
     b.file(hrf.join("hackrf.c"));
     b.compile("sdr_rfa");
+}
+
+/// canonicalize() without the Windows `\\?\` verbatim prefix, which C compilers cannot open.
+fn canon(p: &Path) -> std::io::Result<PathBuf> {
+    let c = p.canonicalize()?;
+    let stripped = c
+        .to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .filter(|rest| !rest.starts_with("UNC\\"))
+        .map(PathBuf::from);
+    Ok(stripped.unwrap_or(c))
 }
