@@ -8,6 +8,7 @@ mod audio;
 mod dab;
 mod dsp;
 mod engine;
+mod fmscan;
 mod rds;
 mod settings;
 mod source;

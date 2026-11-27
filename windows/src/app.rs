@@ -91,10 +91,14 @@ pub struct RfaApp {
     applied_scale: f32,
     applied_dark: Option<bool>,
     /// --scan N: scans still to run automatically, LNA step between them, quit when done
-    auto_scans: u32,
+    pub auto_scans: u32,
     auto_lna_step: i32,
-    auto_quit: bool,
-    auto_next_at: f64,
+    pub auto_quit: bool,
+    pub auto_next_at: f64,
+    pub fm_scan: Option<crate::fmscan::FmScan>,
+    pub fm_scan_status: crate::fmscan::FmScanStatus,
+    pub show_fm_window: bool,
+    auto_fm_scan: bool,
     audio_retry_at: f64,
     next_settings_check: f64,
     saved_settings: String,
@@ -195,6 +199,10 @@ impl RfaApp {
             auto_lna_step: 0,
             auto_quit: false,
             auto_next_at: 0.0,
+            fm_scan: None,
+            fm_scan_status: Default::default(),
+            show_fm_window: false,
+            auto_fm_scan: false,
             audio_retry_at: 0.0,
             next_settings_check: 0.0,
             saved_settings: String::new(),
@@ -263,6 +271,13 @@ impl RfaApp {
                     i += 1;
                 }
                 "--quit-after-scan" => self.auto_quit = true,
+                "--fm-scan" => {
+                    self.auto_fm_scan = true;
+                    self.auto_next_at = 3.0;
+                    self.s.mode = Mode::Wfm;
+                    self.show_fm_window = true;
+                    start = true;
+                }
                 other if !other.starts_with("--") && std::path::Path::new(other).is_file() => {
                     self.s.source.kind = SourceKind::File;
                     self.s.source.file_path = other.to_string();
@@ -427,6 +442,9 @@ impl RfaApp {
     }
 
     pub fn stop(&mut self) {
+        if self.fm_scan.is_some() {
+            self.stop_fm_scan(false);
+        }
         self.reconnect_at = None;
         self.reconnect_tries = 0;
         self.engine.send(Cmd::Stop);
@@ -491,6 +509,9 @@ impl RfaApp {
             self.s.dab_last_service = st.dab_remembered.clone();
         }
         drop(st);
+        if self.fm_scan.is_some() {
+            self.fm_scan_frames(&frames);
+        }
         let d = &self.s.display;
         for f in frames {
             self.view.push_frame(ctx, &f.db, f.center, f.rate, d.db_min, d.db_max, d.colormap);
@@ -951,6 +972,9 @@ impl RfaApp {
                     ui.checkbox(&mut self.s.display.dark, "Dark theme");
                     ui.add(egui::Slider::new(&mut self.s.display.ui_scale, 0.8..=2.5).text("UI scale"));
                     ui.separator();
+                    if ui.button("FM stations (scan and presets)").clicked() {
+                        self.show_fm_window = true;
+                    }
                     if ui.button("Keyboard and mouse help").clicked() {
                         self.show_help = true;
                     }
@@ -1092,6 +1116,15 @@ impl eframe::App for RfaApp {
         self.autosave_settings();
         self.scan_step();
         self.auto_scan_step();
+        if self.auto_fm_scan && self.now() >= self.auto_next_at && self.auto_next_at > 0.0 {
+            self.auto_fm_scan = false;
+            self.auto_next_at = 0.0;
+            self.start_fm_scan();
+        }
+        self.fm_scan_step();
+        if self.fm_scan.is_some() || self.auto_fm_scan {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         if self.auto_next_at < 0.0 && self.scan.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

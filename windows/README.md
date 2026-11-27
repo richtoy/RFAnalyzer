@@ -23,6 +23,8 @@ Good DAB settings: RTL-SDR AGC off, gain 30-40 dB; HackRF amp on, LNA 24, VGA 40
 ### Command line
 `rfanalyzer.exe [file] [--file F] [--mode am|nfm|wfm|lsb|usb|cw|dab] [--freq 97.3M] [--dab-channel 12C] [--start]`
 
+Testing helpers: `--fm-scan` (scan the FM band into the presets, log in `%APPDATA%\RFAnalyzer\fm_scan_log.txt`), `--scan N [--scan-lna-step D]` (DAB scans, log in `dab_scan_log.txt`), `--quit-after-scan`.
+
 Shortcuts: F5/Space start/stop, arrows step, PgUp/PgDn big steps, M mute.
 
 ## Building

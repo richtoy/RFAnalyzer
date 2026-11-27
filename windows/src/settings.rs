@@ -325,6 +325,8 @@ pub struct Settings {
     pub dab_channel: String,
     pub dab_last_service: std::collections::HashMap<String, u32>,
     pub dab_ensembles: Vec<crate::dab::model::SavedEnsemble>,
+    pub fm_presets: Vec<crate::fmscan::FmPreset>,
+    pub fm_scan: crate::fmscan::FmScanConfig,
     pub show_side_panel: bool,
     pub show_info_panel: bool,
 }
@@ -354,6 +356,8 @@ impl Default for Settings {
             dab_channel: "12C".into(),
             dab_last_service: Default::default(),
             dab_ensembles: Vec::new(),
+            fm_presets: Vec::new(),
+            fm_scan: Default::default(),
             show_side_panel: true,
             show_info_panel: true,
         }

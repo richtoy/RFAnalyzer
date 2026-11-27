@@ -44,6 +44,8 @@ impl RfaApp {
 
     fn rds_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        self.preset_strip(ui);
+        ui.add_space(4.0);
         let r = self.rds.clone();
         let ps = r.as_ref().map(|r| if r.ps.trim().is_empty() { r.ps_partial.clone() } else { r.ps.clone() }).unwrap_or_default();
         ui.horizontal(|ui| {
@@ -414,6 +416,9 @@ impl RfaApp {
         }
         if self.show_dab_window {
             self.dab_window(ctx);
+        }
+        if self.show_fm_window {
+            self.fm_window(ctx);
         }
         if self.show_about {
             let mut open = true;
