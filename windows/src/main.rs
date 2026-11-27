@@ -47,6 +47,18 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
+/// Renderer setup: wgpu's primary backends only (DX12 or Vulkan on Windows). By default
+/// egui-wgpu also creates an OpenGL instance as a fallback; tearing that down on exit
+/// sometimes panicked inside wgpu-hal (gles/wgl.rs, "The operation completed successfully"),
+/// so the app exited with code 101 after its settings were saved. WGPU_BACKEND=gl still
+/// selects OpenGL on a machine that needs it.
+fn gpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::PRIMARY);
+    WgpuConfiguration { wgpu_setup: WgpuSetup::CreateNew(setup), ..Default::default() }
+}
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -57,6 +69,7 @@ fn main() -> eframe::Result<()> {
         // eframe saved a minimized window as 0x0 at (-32000,-32000) and then panicked on every start;
         // always open at the default size instead
         persist_window: false,
+        wgpu_options: gpu_options(),
         ..Default::default()
     };
     eframe::run_native("RF Analyzer", options, Box::new(|cc| Ok(Box::new(app::RfaApp::new(cc)))))

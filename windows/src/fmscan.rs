@@ -227,26 +227,39 @@ impl Track {
             0 => String::new(),
             1 => self.ps_seen[0].0.trim().to_string(),
             _ => {
-                // Several stable pages: a scrolling PS (or garbled reads). Keep, in order of
-                // appearance, the pages that
-                // * came back at least twice, or were seen for at least 30 % of the longest
-                //   page's time (one-off reads go; a short page such as "KLASSIEK" after a
-                //   long "NPO" survives because it recurs every cycle),
-                // * are not a stitch of segments from pages seen longer (is_mixed_page), and
-                // * are not within 2 characters of a page seen longer (corrupted copies).
-                let best = self.ps_seen.iter().map(|x| x.1).fold(0.0, f64::max);
-                let pages: Vec<&str> = self
+                // Several stable pages: a scrolling PS, plus reads caught mid-change or garbled.
+                // Three passes, in order:
+                // 1. Drop stitches: pages made entirely of segments of other pages that are at
+                //    least as established (seen as long, or as often), even when those were seen
+                //    only a little longer ("KLAS  EK" = KLASSIEK with one segment still from
+                //    "NPO     "). Comparing only with established pages stops two different
+                //    stitches from together knocking out the real page they came from.
+                let unmixed: Vec<&(String, f64, u32)> = self
                     .ps_seen
                     .iter()
                     .filter(|(p, secs, eps)| {
-                        if *secs < 0.3 * best && *eps < 2 {
-                            return false;
-                        }
-                        // pages seen longer than this one (ties don't count, so two real
-                        // pages of equal time can't knock each other out)
-                        let longer: Vec<&str> = self.ps_seen.iter().filter(|(q, s, _)| q != p && *s > *secs).map(|(q, _, _)| q.as_str()).collect();
-                        !is_mixed_page(p, &longer) && !longer.iter().any(|q| ps_distance(p, q) <= 2)
+                        let others: Vec<&str> =
+                            self.ps_seen.iter().filter(|(q, s, e)| q != p && (*s >= *secs || *e >= *eps)).map(|(q, _, _)| q.as_str()).collect();
+                        !is_mixed_page(p, &others)
                     })
+                    .collect();
+                // 2. Drop one-off reads: keep pages that came back at least twice, or were seen
+                //    for at least 30 % of the longest page's time (a short page such as
+                //    "KLASSIEK" after a long "NPO" survives because it recurs every cycle).
+                let best = unmixed.iter().map(|x| x.1).fold(0.0, f64::max);
+                let kept: Vec<&(String, f64, u32)> = unmixed.into_iter().filter(|(_, secs, eps)| *secs >= 0.3 * best || *eps >= 2).collect();
+                // 3. Of pages within 2 characters of each other (a corrupted copy), keep the
+                //    better one: plain ASCII beats a page with odd characters ("RADIO å@"),
+                //    then the one seen longer. Exact ties keep both.
+                let plain = |p: &str| p.chars().all(|c| (' '..='~').contains(&c));
+                let better = |q: &(String, f64, u32), p: &(String, f64, u32)| match (plain(&q.0), plain(&p.0)) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    _ => q.1 > p.1,
+                };
+                let pages: Vec<&str> = kept
+                    .iter()
+                    .filter(|p| !kept.iter().any(|q| q.0 != p.0 && ps_distance(&p.0, &q.0) <= 2 && better(q, p)))
                     .map(|x| x.0.trim())
                     .collect();
                 if pages.len() == 1 {
@@ -676,7 +689,9 @@ impl RfaApp {
                     // the side where the measured level is higher. One try instead of two keeps a
                     // carrier without RDS to about 10 s instead of 15.
                     let k = sc.candidates[*index];
-                    let taken: Vec<u64> = sc.candidates.iter().map(|&i| sc.grid[i]).collect();
+                    // not a frequency that is a candidate itself or already in the list (94.0 and
+                    // 94.2 both moved to 94.1 once, listing it twice)
+                    let taken: Vec<u64> = sc.candidates.iter().map(|&i| sc.grid[i]).chain(sc.found.iter().map(|p| p.freq)).collect();
                     let lvl = |j: Option<usize>| j.and_then(|j| sc.levels.get(j).copied()).unwrap_or(f32::NEG_INFINITY);
                     let (below, above) = (k.checked_sub(1), Some(k + 1).filter(|&j| j < sc.grid.len()));
                     let side = if lvl(above) >= lvl(below) { above } else { below };
@@ -913,6 +928,22 @@ mod tests {
             tr.observe(t, ps, "");
         }
         assert_eq!(tr.name(), "NPO R1 RADIO 1");
+    }
+
+    #[test]
+    fn stitch_and_odd_characters_are_dropped() {
+        let mut tr = Track::default();
+        // KLASSIEK recurs but is seen less than its stitch "KLAS  EK"; "RADIO å@" is a
+        // corrupted copy of "RADIO 1 " seen longer
+        tr.ps_seen = vec![
+            ("NPO     ".into(), 8.0, 4),
+            ("KLAS  EK".into(), 3.0, 1),
+            ("KLASSIEK".into(), 2.0, 4),
+            ("KLASSI  ".into(), 1.5, 1),
+        ];
+        assert_eq!(tr.name(), "NPO KLASSIEK");
+        tr.ps_seen = vec![("RADIO 1 ".into(), 3.0, 1), ("RADIO å@".into(), 5.0, 2)];
+        assert_eq!(tr.name(), "RADIO 1");
     }
 
     #[test]
