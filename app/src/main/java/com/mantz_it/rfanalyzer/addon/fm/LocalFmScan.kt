@@ -203,12 +203,14 @@ object LocalFmScan {
             var completed = false
             try {
                 completed = runScan(r)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                note("=== FM scan stopped")
+                throw e
             } finally {
                 frameWanted = false
                 verifyFrequency = 0L
                 acceptFramesAfterMs = Long.MAX_VALUE
                 _status.value = _status.value.copy(running = false, finished = completed)
-                if (!completed) note("=== FM scan stopped")
                 restore()
             }
         }
@@ -235,8 +237,20 @@ object LocalFmScan {
         _status.value = _status.value.copy(stage = text, progress = progress)
     }
 
+    /** Thrown inside the scan when the source stops (unplugged SDR, end of a file). */
+    private class SourceStopped : Exception()
+
+    private fun checkRunning(r: Radio) { if (!r.isRunning()) throw SourceStopped() }
+
     /** The whole scan; returns true when it ran to the end. */
-    private suspend fun runScan(r: Radio): Boolean {
+    private suspend fun runScan(r: Radio): Boolean = try {
+        scan(r)
+    } catch (e: SourceStopped) {
+        note("=== FM scan stopped: the source stopped (SDR unplugged, or the end of a file?)")
+        false
+    }
+
+    private suspend fun scan(r: Radio): Boolean {
         val cfg = config
         _status.value = Status(running = true, stage = "Starting")
         r.prepare()
@@ -268,6 +282,7 @@ object LocalFmScan {
             // move on after >= 6 frames and 0.8 s, or after 4 s regardless
             while (true) {
                 delay(100)
+                checkRunning(r)
                 val dt = System.currentTimeMillis() - t0
                 val frames = synchronized(lock) { framesUsed }
                 if ((frames >= 6 && dt > 800) || dt > 4000) break
@@ -365,6 +380,7 @@ object LocalFmScan {
         var snap = FmStationRds.Snapshot()
         while (true) {
             delay(100)
+            checkRunning(r)
             val t = (System.currentTimeMillis() - t0) / 1000.0
             if (t < 0.8) continue // the engine retunes and the previous station's RDS drains
             val m = LocalDiagnostics.fm.value

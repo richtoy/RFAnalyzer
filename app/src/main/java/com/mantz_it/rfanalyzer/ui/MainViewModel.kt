@@ -1691,6 +1691,8 @@ class MainViewModel @Inject constructor(
         )
 
         override fun prepare() {
+            // a file is scanned while it plays: without Repeat it would end halfway through the scan
+            if (asr.sourceType.value == SourceType.FILESOURCE) asr.filesourceRepeatEnabled.set(true)
             val ch = asr.channelFrequency.value
             val f = if (asr.demodulationMode.value == DemodulationMode.WFM && ch in 87_500_000L..108_000_000L) ch else 87_500_000L
             tuner.tune(wfm("FM scan", f)) { startAnalyzerAfterTuneTo() }
