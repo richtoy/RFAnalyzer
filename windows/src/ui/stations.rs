@@ -167,6 +167,9 @@ impl RfaApp {
                         let af = if p.af.is_empty() { String::new() } else { format!("{}", p.af.len()) };
                         ui.label(af).on_hover_text(p.af.iter().map(|f| format!("{f:.1}")).collect::<Vec<_>>().join(", "));
                         let mut ex = Vec::new();
+                        if let Some(f) = p.same_pi_as {
+                            ex.push(format!("= {:.1}", f as f64 / 1e6));
+                        }
                         if p.rtplus {
                             ex.push("RT+".to_string());
                         }

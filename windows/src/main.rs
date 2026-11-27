@@ -45,6 +45,9 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1600.0, 950.0])
             .with_min_inner_size([900.0, 600.0])
             .with_icon(app::icon()),
+        // eframe saved a minimized window as 0x0 at (-32000,-32000) and then panicked on every start;
+        // always open at the default size instead
+        persist_window: false,
         ..Default::default()
     };
     eframe::run_native("RF Analyzer", options, Box::new(|cc| Ok(Box::new(app::RfaApp::new(cc)))))

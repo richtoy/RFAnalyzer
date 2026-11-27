@@ -1132,6 +1132,11 @@ impl eframe::App for RfaApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
+        // minimized (0x0): keep the radio running but don't lay out panels in no space
+        let r = ctx.content_rect();
+        if r.width() < 200.0 || r.height() < 150.0 {
+            return;
+        }
         egui::Panel::top("top").frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(10, 8))).show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         if self.s.show_side_panel {

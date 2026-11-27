@@ -461,6 +461,30 @@ impl RdsStation {
         let ecc = self.ecc?;
         country(ecc, cc)
     }
+
+    /// Country from ECC + PI, or a Western-European guess from the PI country nibble alone
+    /// (marked with "?") when no ECC has been received.
+    pub fn country_or_guess(&self) -> Option<String> {
+        if let Some(c) = self.country_hint() {
+            return Some(c.to_string());
+        }
+        let cc = (self.pi? >> 12) as u8;
+        let g = match cc {
+            0x8 => "Netherlands",
+            0x6 => "Belgium",
+            0xD | 0x1 => "Germany",
+            0x7 => "Luxembourg",
+            0xF => "France",
+            0xC => "United Kingdom",
+            0xA => "Austria",
+            0x4 => "Switzerland",
+            0x9 => "Denmark",
+            0xE => "Spain",
+            0x5 => "Italy",
+            _ => return None,
+        };
+        Some(format!("{g}?"))
+    }
 }
 
 /// A few common ECC/country-code pairs (IEC 62106 Annex D), enough for Western Europe.

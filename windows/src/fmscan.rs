@@ -39,6 +39,8 @@ pub struct FmPreset {
     pub oda: Vec<String>,
     /// seconds until the full PS was received
     pub ps_secs: Option<f32>,
+    /// another (stronger) preset carries the same PI: this is likely a distant transmitter of it
+    pub same_pi_as: Option<u64>,
     pub scanned: String,
 }
 
@@ -75,7 +77,7 @@ impl Default for FmScanConfig {
 
 pub enum FmScanPhase {
     Survey { window: usize, t0: f64, frames: usize },
-    Verify { index: usize, t0: f64, pilot_seen: bool, rds_seen: bool, ps_at: Option<f64>, level_sum: f64, level_n: u32 },
+    Verify { index: usize, t0: f64, pilot_seen: u32, rds_seen: bool, ps_at: Option<f64>, level_sum: f64, level_n: u32 },
 }
 
 pub struct FmScan {
@@ -211,6 +213,7 @@ impl RfaApp {
         self.s.rds_enabled = rds || finished;
         if finished && !sc.found.is_empty() {
             let mut found = sc.found;
+            mark_same_pi(&mut found);
             // keep the names the user gave stations that were found again
             for f in found.iter_mut() {
                 if let Some(old) = self.s.fm_presets.iter().find(|p| p.freq == f.freq && !p.name.is_empty()) {
@@ -319,7 +322,7 @@ impl RfaApp {
                 if sc.candidates.is_empty() {
                     return true;
                 }
-                sc.phase = FmScanPhase::Verify { index: 0, t0: now, pilot_seen: false, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0 };
+                sc.phase = FmScanPhase::Verify { index: 0, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0 };
                 let f = sc.grid[sc.candidates[0]];
                 self.fm_scan_status.stage = format!("Checking {:.1} MHz", f as f64 / 1e6);
                 self.set_channel(f);
@@ -330,11 +333,13 @@ impl RfaApp {
                 if t < 0.8 {
                     return false; // let the engine retune and drop the previous station's RDS
                 }
-                if self.fm.pilot_locked {
-                    *pilot_seen = true;
+                // stereo: the pilot PLL locked on several polls after the station settled
+                if t >= 1.2 && self.fm.pilot_locked && self.fm.pilot_db > -45.0 {
+                    *pilot_seen += 1;
                 }
                 let r = self.rds.clone();
-                if r.as_ref().map(|r| r.pi.is_some()).unwrap_or(false) || self.rds_stats.synced {
+                // RDS only when a PI was decoded (block sync alone happens on noise)
+                if r.as_ref().map(|r| r.pi.is_some()).unwrap_or(false) {
                     *rds_seen = true;
                 }
                 if ps_at.is_none() && r.as_ref().map(|r| !r.ps.trim().is_empty()).unwrap_or(false) {
@@ -345,7 +350,10 @@ impl RfaApp {
                     *level_n += 1;
                 }
                 let max = sc.cfg.max_secs as f64;
-                let done = (!*rds_seen && t >= 3.0) || ps_at.map(|p| t >= p + 2.0).unwrap_or(false) || t >= max;
+                // weak carriers get longer to show RDS: they are often distant transmitters
+                let snr = sc.levels[sc.candidates[*index]] - sc.floor_db;
+                let no_rds_wait: f64 = if snr >= 15.0 { 7.0 } else if snr >= 11.0 { 5.0 } else { 3.5 };
+                let done = (!*rds_seen && t >= no_rds_wait.min(max)) || ps_at.map(|p| t >= p + 2.0).unwrap_or(false) || t >= max;
                 if !done {
                     return false;
                 }
@@ -356,7 +364,7 @@ impl RfaApp {
                     freq: f,
                     level_db: level,
                     snr_db: survey_level - sc.floor_db,
-                    stereo: *pilot_seen || self.fm.stereo,
+                    stereo: *pilot_seen >= 3,
                     pilot_db: self.fm.pilot_db,
                     rds: *rds_seen,
                     ps_secs: ps_at.map(|x| x as f32),
@@ -365,7 +373,8 @@ impl RfaApp {
                 };
                 if let Some(r) = r.filter(|_| *rds_seen) {
                     p.pi = r.pi;
-                    p.ps = if r.ps.trim().is_empty() { r.ps_partial.trim().to_string() } else { r.ps.trim().to_string() };
+                    // only a complete PS; a partial one ("RADI") makes a poor label
+                    p.ps = r.ps.trim().to_string();
                     p.long_ps = r.long_ps.clone();
                     p.pty = r.pty;
                     p.ptyn = r.ptyn.clone();
@@ -373,7 +382,7 @@ impl RfaApp {
                     p.ta = r.ta;
                     p.music = r.music;
                     p.ecc = r.ecc;
-                    p.country = r.country_hint().map(|s| s.to_string());
+                    p.country = r.country_or_guess();
                     p.af = r.af.clone();
                     p.rt = r.rt.trim().to_string();
                     p.rtplus = r.rtplus_title.is_some() || r.rtplus_artist.is_some();
@@ -405,7 +414,7 @@ impl RfaApp {
                 if next >= sc.candidates.len() {
                     return true;
                 }
-                sc.phase = FmScanPhase::Verify { index: next, t0: now, pilot_seen: false, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0 };
+                sc.phase = FmScanPhase::Verify { index: next, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0 };
                 let f = sc.grid[sc.candidates[next]];
                 self.fm_scan_status.stage = format!("Checking {:.1} MHz ({} of {})", f as f64 / 1e6, next + 1, sc.candidates.len());
                 self.set_channel(f);
@@ -428,16 +437,36 @@ impl RfaApp {
     }
 }
 
+/// Flags presets whose PI also belongs to a stronger preset (a distant transmitter of the same
+/// programme, or an image of it) and lets them borrow that station's PS if they have none.
+pub fn mark_same_pi(found: &mut [FmPreset]) {
+    let snapshot: Vec<(u64, Option<u16>, f32, String)> = found.iter().map(|p| (p.freq, p.pi, p.level_db, p.ps.clone())).collect();
+    for p in found.iter_mut() {
+        let Some(pi) = p.pi else { continue };
+        if let Some(best) = snapshot
+            .iter()
+            .filter(|(f, q, l, _)| *f != p.freq && *q == Some(pi) && *l > p.level_db)
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+        {
+            p.same_pi_as = Some(best.0);
+            if p.ps.is_empty() {
+                p.ps = best.3.clone();
+            }
+        }
+    }
+}
+
 /// Presets as CSV (one row per station).
 pub fn presets_csv(list: &[FmPreset]) -> String {
-    let mut s = String::from("freq_mhz,name,ps,pi,pty,stereo,rds,tp,ta,country,ecc,level_db,snr_db,bler_pct,groups_per_s,af_mhz,rt,ptyn,long_ps,rtplus,eon,tmc,clock,oda,scanned\n");
+    let mut s = String::from("freq_mhz,name,ps,same_pi_as_mhz,pi,pty,stereo,rds,tp,ta,country,ecc,level_db,snr_db,bler_pct,groups_per_s,af_mhz,rt,ptyn,long_ps,rtplus,eon,tmc,clock,oda,scanned\n");
     let q = |x: &str| format!("\"{}\"", x.replace('"', "\"\""));
     for p in list {
         s.push_str(&format!(
-            "{:.2},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{},{:.1},{},{},{},{},{},{},{},{},{},{}\n",
+            "{:.2},{},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{},{:.1},{},{},{},{},{},{},{},{},{},{}\n",
             p.freq as f64 / 1e6,
             q(&p.name),
             q(&p.ps),
+            p.same_pi_as.map(|f| format!("{:.1}", f as f64 / 1e6)).unwrap_or_default(),
             p.pi.map(|x| format!("{x:04X}")).unwrap_or_default(),
             p.pty.map(|x| x.to_string()).unwrap_or_default(),
             p.stereo,
@@ -489,6 +518,18 @@ mod tests {
         let (floor, c) = pick_candidates(&l, 10.0);
         assert!((floor + 90.0).abs() < 0.01);
         assert_eq!(c, vec![5, 13]);
+    }
+
+    #[test]
+    fn same_pi_marks_weaker() {
+        let mut v = vec![
+            FmPreset { freq: 105_300_000, pi: Some(0x8201), level_db: 1.0, ps: "NPO R1".into(), ..Default::default() },
+            FmPreset { freq: 106_700_000, pi: Some(0x8201), level_db: -14.0, ..Default::default() },
+        ];
+        mark_same_pi(&mut v);
+        assert_eq!(v[0].same_pi_as, None);
+        assert_eq!(v[1].same_pi_as, Some(105_300_000));
+        assert_eq!(v[1].ps, "NPO R1");
     }
 
     #[test]
