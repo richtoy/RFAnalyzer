@@ -88,6 +88,11 @@ pub struct RfaApp {
     pub pty_rbds: bool,
     applied_scale: f32,
     applied_dark: Option<bool>,
+    /// --scan N: scans still to run automatically, LNA step between them, quit when done
+    auto_scans: u32,
+    auto_lna_step: i32,
+    auto_quit: bool,
+    auto_next_at: f64,
 }
 
 pub fn icon() -> egui::IconData {
@@ -171,6 +176,10 @@ impl RfaApp {
             pty_rbds: false,
             applied_scale: 0.0,
             applied_dark: None,
+            auto_scans: 0,
+            auto_lna_step: 0,
+            auto_quit: false,
+            auto_next_at: 0.0,
             s,
         };
         app.engine.send(Cmd::DabRemembered(app.s.dab_last_service.clone()));
@@ -220,6 +229,18 @@ impl RfaApp {
                     }
                 }
                 "--start" => start = true,
+                "--scan" => {
+                    self.auto_scans = next.as_deref().and_then(|x| x.parse().ok()).unwrap_or(1);
+                    self.auto_next_at = 3.0;
+                    self.s.mode = Mode::Dab;
+                    start = true;
+                    i += 1;
+                }
+                "--scan-lna-step" => {
+                    self.auto_lna_step = next.as_deref().and_then(|x| x.parse().ok()).unwrap_or(0);
+                    i += 1;
+                }
+                "--quit-after-scan" => self.auto_quit = true,
                 other if !other.starts_with("--") && std::path::Path::new(other).is_file() => {
                     self.s.source.kind = SourceKind::File;
                     self.s.source.file_path = other.to_string();
@@ -465,11 +486,35 @@ impl RfaApp {
         if !self.running {
             self.start();
         }
+        scan_log_line(&format!(
+            "=== scan start: source {:?}, rate {}, lna {}, vga {}, amp {}, rtl gain {}, agc {}",
+            self.s.source.kind,
+            self.s.source.sample_rate,
+            self.s.source.hackrf_lna,
+            self.s.source.hackrf_vga,
+            self.s.source.hackrf_amp,
+            self.s.source.rtl_gain,
+            self.s.source.rtl_agc
+        ));
         let channels = model::scan_list();
         self.scan_state = DabScanState { running: true, count: channels.len(), ..Default::default() };
         let first = channels[0].name.to_string();
         self.scan = Some(Scan { channels, index: 0, phase: ScanPhase::Tuning, t0: self.now(), previous_channel: self.s.dab_channel.clone() });
         self.set_dab_channel(first);
+    }
+
+    fn auto_scan_step(&mut self) {
+        if self.auto_scans == 0 || self.scan.is_some() || self.now() < self.auto_next_at {
+            return;
+        }
+        if self.scan_state.finished && self.auto_lna_step != 0 {
+            let lna = (self.s.source.hackrf_lna as i32 + self.auto_lna_step).clamp(0, 40) as u32;
+            self.s.source.hackrf_lna = lna;
+            scan_log_line(&format!("auto: LNA set to {lna}"));
+        }
+        self.auto_scans -= 1;
+        self.start_scan();
+        self.auto_next_at = 0.0;
     }
 
     pub fn stop_scan(&mut self) {
@@ -491,7 +536,8 @@ impl RfaApp {
         let mut note: Option<String> = None;
         match scan.phase {
             ScanPhase::Tuning => {
-                if on_channel && st.seconds_since_tune < 1.5 {
+                // tuned since this step began (the age is only refreshed every 0.5 s)
+                if on_channel && (st.seconds_since_tune as f64) < el + 0.6 {
                     scan.phase = ScanPhase::WaitSync;
                     scan.t0 = now;
                 } else if el > 4.0 {
@@ -533,6 +579,17 @@ impl RfaApp {
             }
         }
         if let Some(n) = note {
+            let diag = format!(
+                "  [t {:.1}s, in {:.2} Msps, level {:.1} dB, dropped {}, overflows {}, since tune {:.1}s, sync {}]",
+                now,
+                st.input_rate as f64 / 1e6,
+                st.input_level_db,
+                st.dropped_samples,
+                self.overflows,
+                st.seconds_since_tune,
+                st.sync_seen
+            );
+            scan_log_line(&format!("{n}{diag}"));
             self.scan_state.log.push(n);
         }
         if next {
@@ -543,6 +600,12 @@ impl RfaApp {
                 self.scan = None;
                 self.scan_state.running = false;
                 self.scan_state.finished = true;
+                scan_log_line(&format!("=== scan finished: {} ensembles", found.len()));
+                if self.auto_scans > 0 {
+                    self.auto_next_at = now + 20.0;
+                } else if self.auto_quit {
+                    self.auto_next_at = -1.0;
+                }
                 if !found.is_empty() {
                     self.s.dab_ensembles = found.clone();
                     self.set_dab_channel(found[0].channel.clone());
@@ -895,6 +958,13 @@ impl eframe::App for RfaApp {
         self.poll_status(&ctx);
         self.shortcuts(&ctx);
         self.scan_step();
+        self.auto_scan_step();
+        if self.auto_next_at < 0.0 && self.scan.is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if self.scan.is_some() || self.auto_scans > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
 
         egui::Panel::top("top").frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(10, 8))).show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -919,5 +989,15 @@ impl eframe::App for RfaApp {
     fn on_exit(&mut self) {
         self.engine.send(Cmd::Stop);
         std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
+/// Appends a line to %APPDATA%\\RFAnalyzer\\dab_scan_log.txt (scan diagnostics).
+fn scan_log_line(line: &str) {
+    use std::io::Write;
+    let Some(dir) = crate::config_dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("dab_scan_log.txt")) {
+        let _ = writeln!(f, "{} {}", chrono::Local::now().format("%H:%M:%S"), line);
     }
 }
