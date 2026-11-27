@@ -77,7 +77,21 @@ impl Default for FmScanConfig {
 
 pub enum FmScanPhase {
     Survey { window: usize, t0: f64, frames: usize },
-    Verify { index: usize, t0: f64, pilot_seen: u32, rds_seen: bool, ps_at: Option<f64>, level_sum: f64, level_n: u32, tr: Track },
+    Verify {
+        index: usize,
+        t0: f64,
+        pilot_seen: u32,
+        rds_seen: bool,
+        ps_at: Option<f64>,
+        level_sum: f64,
+        level_n: u32,
+        tr: Track,
+        /// frequency being listened to (the candidate, or a neighbour of it)
+        freq: u64,
+        /// neighbours still to try when the candidate showed no RDS
+        alts: Option<Vec<u64>>,
+        base: Option<Box<FmPreset>>,
+    },
 }
 
 /// What one station showed while it was being checked: PS and RT only count once they have stayed
@@ -135,7 +149,12 @@ impl Track {
             0 => String::new(),
             1 => self.ps_seen[0].0.clone(),
             _ => {
-                let joined = self.ps_seen.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(" ");
+                let best = self.ps_seen.iter().map(|x| x.1).fold(0.0, f64::max);
+                let pages: Vec<&str> = self.ps_seen.iter().filter(|x| x.1 >= 0.3 * best).map(|x| x.0.as_str()).collect();
+                if pages.len() == 1 {
+                    return pages[0].to_string();
+                }
+                let joined = pages.join(" ");
                 if joined.chars().count() <= 24 {
                     joined
                 } else {
@@ -393,13 +412,13 @@ impl RfaApp {
                 if sc.candidates.is_empty() {
                     return true;
                 }
-                sc.phase = FmScanPhase::Verify { index: 0, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0, tr: Track::default() };
+                sc.phase = FmScanPhase::Verify { index: 0, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0, tr: Track::default(), freq: 0, alts: None, base: None };
                 let f = sc.grid[sc.candidates[0]];
                 self.fm_scan_status.stage = format!("Checking {:.1} MHz", f as f64 / 1e6);
                 self.set_channel(f);
                 false
             }
-            FmScanPhase::Verify { index, t0, pilot_seen, rds_seen, ps_at, level_sum, level_n, tr } => {
+            FmScanPhase::Verify { index, t0, pilot_seen, rds_seen, ps_at, level_sum, level_n, tr, freq, alts, base } => {
                 let t = now - *t0;
                 if t < 0.8 {
                     return false; // let the engine retune and drop the previous station's RDS
@@ -428,12 +447,20 @@ impl RfaApp {
                 let max = sc.cfg.max_secs as f64;
                 // weak carriers get longer to show RDS: they are often distant transmitters
                 let snr = sc.levels[sc.candidates[*index]] - sc.floor_db;
-                let no_rds_wait: f64 = if snr >= 15.0 { 7.0 } else if snr >= 11.0 { 5.0 } else { 3.5 };
+                let no_rds_wait: f64 = if alts.is_some() {
+                    4.0 // a neighbour of a carrier: a quick look is enough
+                } else if snr >= 15.0 {
+                    7.0
+                } else if snr >= 11.0 {
+                    5.0
+                } else {
+                    3.5
+                };
                 let done = (!*rds_seen && t >= no_rds_wait.min(max)) || ps_at.map(|p| t >= p + 4.5).unwrap_or(false) || t >= max;
                 if !done {
                     return false;
                 }
-                let f = sc.grid[sc.candidates[*index]];
+                let f = if *freq != 0 { *freq } else { sc.grid[sc.candidates[*index]] };
                 let level = if *level_n > 0 { (*level_sum / *level_n as f64) as f32 } else { sc.levels[sc.candidates[*index]] };
                 let survey_level = sc.levels[sc.candidates[*index]];
                 let mut p = FmPreset {
@@ -478,6 +505,49 @@ impl RfaApp {
                     });
                     p.groups_per_sec = self.rds_stats.groups_per_sec;
                 }
+                // a strong carrier without RDS may be a station whose peak the survey placed one step
+                // off (seen on the HackRF): listen on the neighbouring channels before giving up
+                if !p.rds && alts.is_none() && snr >= 15.0 {
+                    let step = sc.cfg.step_hz.max(10_000);
+                    let taken: Vec<u64> = sc.candidates.iter().map(|&i| sc.grid[i]).collect();
+                    let v: Vec<u64> = [f + step, f.saturating_sub(step)]
+                        .into_iter()
+                        .filter(|g| *g >= sc.cfg.start_hz && *g <= sc.cfg.end_hz && !taken.contains(g))
+                        .collect();
+                    if !v.is_empty() {
+                        *base = Some(Box::new(p.clone()));
+                        *alts = Some(v);
+                    }
+                }
+                if !p.rds || base.is_some() {
+                    if p.rds {
+                        // a neighbour carries the RDS: keep that one instead of the candidate
+                        let line = format!("{:.1} MHz showed no RDS; found it on {:.1} MHz", sc.grid[sc.candidates[*index]] as f64 / 1e6, f as f64 / 1e6);
+                        fm_log(&line);
+                        self.fm_scan_status.log.push(line);
+                        *base = None;
+                        *alts = Some(Vec::new());
+                    }
+                    if let Some(next_alt) = alts.as_mut().and_then(|v| if v.is_empty() { None } else { Some(v.remove(0)) }) {
+                        *t0 = now;
+                        *pilot_seen = 0;
+                        *rds_seen = false;
+                        *ps_at = None;
+                        *level_sum = 0.0;
+                        *level_n = 0;
+                        *tr = Track::default();
+                        *freq = next_alt;
+                        self.fm_scan_status.stage = format!("Trying {:.1} MHz next to {:.1}", next_alt as f64 / 1e6, sc.grid[sc.candidates[*index]] as f64 / 1e6);
+                        self.set_channel(next_alt);
+                        return false;
+                    }
+                }
+                // neighbours tried without RDS: keep what the candidate itself showed
+                let p = match base.take() {
+                    Some(b) if !p.rds => *b,
+                    _ => p,
+                };
+                let f = p.freq;
                 let line = format!(
                     "{:6.1} MHz  {:8}  PI {:4}  {}  {}  level {:.1} dB  SNR {:.1} dB  {}{}{}",
                     f as f64 / 1e6,
@@ -499,7 +569,7 @@ impl RfaApp {
                 if next >= sc.candidates.len() {
                     return true;
                 }
-                sc.phase = FmScanPhase::Verify { index: next, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0, tr: Track::default() };
+                sc.phase = FmScanPhase::Verify { index: next, t0: now, pilot_seen: 0, rds_seen: false, ps_at: None, level_sum: 0.0, level_n: 0, tr: Track::default(), freq: 0, alts: None, base: None };
                 let f = sc.grid[sc.candidates[next]];
                 self.fm_scan_status.stage = format!("Checking {:.1} MHz ({} of {})", f as f64 / 1e6, next + 1, sc.candidates.len());
                 self.set_channel(f);
@@ -534,7 +604,7 @@ pub fn mark_same_pi(found: &mut [FmPreset]) {
             .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
         {
             p.same_pi_as = Some(best.0);
-            if p.ps.is_empty() {
+            if !best.3.is_empty() {
                 p.ps = best.3.clone();
             }
         }
@@ -630,6 +700,18 @@ mod tests {
         assert_eq!(v[0].same_pi_as, None);
         assert_eq!(v[1].same_pi_as, Some(105_300_000));
         assert_eq!(v[1].ps, "NPO R1");
+    }
+
+    #[test]
+    fn garbled_page_is_dropped() {
+        let mut tr = Track::default();
+        // "NPO R1" and "RADIO 1" alternate every 3 s; "RADIR1" shows once for 1.2 s
+        for i in 0..300 {
+            let t = i as f64 * 0.05;
+            let ps = if (5.0..6.2).contains(&t) { "RADIR1" } else if (t as i32 / 3) % 2 == 0 { "NPO R1" } else { "RADIO 1" };
+            tr.observe(t, ps, "");
+        }
+        assert_eq!(tr.name(), "NPO R1 RADIO 1");
     }
 
     #[test]
