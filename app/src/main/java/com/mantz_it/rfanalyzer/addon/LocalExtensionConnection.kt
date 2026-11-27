@@ -224,6 +224,8 @@ class LocalExtensionConnection(
         val events = try { rdsParser.parse(blocks) } catch (e: Exception) {
             Log.w(TAG, "onRdsGroup: parser failed: ${e.message}"); emptyList()
         }
+        // a group whose PI is not confirmed yet is dropped entirely (see RdsGroupParser.parse)
+        if (rdsParser.lastGroupHeld) return
         val raw = ByteArray(8)
         for (i in 0..3) { raw[2 * i] = (blocks[i] ushr 8).toByte(); raw[2 * i + 1] = blocks[i].toByte() }
         LocalDiagnostics.onRdsGroup(blocks)

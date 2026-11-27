@@ -38,6 +38,15 @@ class RdsGroupParser {
         private set
 
     private var currentPi = -1
+    /** A PI seen once that differs from [currentPi], waiting for a second group to confirm it. */
+    private var piCandidate = -1
+    /**
+     * True when the last group passed to [parse] was held back because its PI is not confirmed
+     * yet. The caller should then not forward that group to the UI either (the RDS screens read
+     * the PI from the raw group).
+     */
+    var lastGroupHeld = false
+        private set
 
     // PS
     private val ps = CharArray(8) { ' ' }
@@ -91,7 +100,7 @@ class RdsGroupParser {
     private var rtPlusTags: IntArray? = null
 
     fun reset() {
-        currentPi = -1
+        currentPi = -1; piCandidate = -1
         ps.fill(' '); psMask = 0; lastPs = null
         rt.fill(' '); rtMask = 0; rtAb = -1; rtEnd = -1; lastRt = null
         afExpected = 0; afList.clear(); lastAf = null
@@ -103,7 +112,20 @@ class RdsGroupParser {
 
     fun parse(b: IntArray): List<RdsEvent> {
         val a = b[0]; val bb = b[1]; val c = b[2]; val d = b[3]
-        if (a != currentPi) { reset(); currentPi = a }
+        // A new PI means a different station: start from scratch. It is only believed when two
+        // groups in a row carry it: on a weak signal the burst corrector can turn a damaged block A
+        // into a wrong but valid-looking PI (seen on air: 8E07 instead of 8201 at 61 % BLER), and
+        // one such group must neither be reported nor wipe the station's PS and RT.
+        if (a != currentPi) {
+            if (a != piCandidate) {
+                piCandidate = a
+                lastGroupHeld = true
+                return emptyList()
+            }
+            reset(); currentPi = a
+        }
+        piCandidate = -1
+        lastGroupHeld = false
         val type = bb ushr 12
         val versionA = (bb ushr 11) and 1 == 0
         val tp = (bb ushr 10) and 1 == 1
