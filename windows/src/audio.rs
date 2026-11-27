@@ -62,13 +62,21 @@ impl AudioShared {
     }
 }
 
+/// An open output. The cpal stream lives on its own thread: WASAPI needs COM in multithreaded
+/// mode, and the UI thread is already single-threaded (reopening there fails with
+/// RPC_E_CHANGED_MODE, which left the app silent after sleep/wake). Dropping this stops it.
 pub struct AudioOut {
-    _stream: cpal::Stream,
+    _stop: crossbeam_channel::Sender<()>,
     pub device_name: String,
     pub device_rate: u32,
 }
 
 pub fn output_device_names() -> Vec<String> {
+    // on its own thread for the same COM reason as AudioOut::open
+    std::thread::spawn(device_names_here).join().unwrap_or_default()
+}
+
+fn device_names_here() -> Vec<String> {
     let host = cpal::default_host();
     host.output_devices()
         .map(|it| it.filter_map(|d| d.description().ok().map(|x| x.name().to_string())).collect())
@@ -77,6 +85,31 @@ pub fn output_device_names() -> Vec<String> {
 
 impl AudioOut {
     pub fn open(shared: Arc<AudioShared>, wanted: &str) -> Result<AudioOut, String> {
+        let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
+        let (res_tx, res_rx) = crossbeam_channel::bounded::<Result<(String, u32), String>>(1);
+        let wanted = wanted.to_string();
+        std::thread::Builder::new()
+            .name("audio-out".into())
+            .spawn(move || match Self::open_here(shared, &wanted) {
+                Ok((stream, name, rate)) => {
+                    let _ = res_tx.send(Ok((name, rate)));
+                    // keep the stream alive until the AudioOut is dropped
+                    let _ = stop_rx.recv();
+                    drop(stream);
+                }
+                Err(e) => {
+                    let _ = res_tx.send(Err(e));
+                }
+            })
+            .map_err(|e| format!("audio: {e}"))?;
+        match res_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok((device_name, device_rate))) => Ok(AudioOut { _stop: stop_tx, device_name, device_rate }),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err("audio: the output device did not respond".into()),
+        }
+    }
+
+    fn open_here(shared: Arc<AudioShared>, wanted: &str) -> Result<(cpal::Stream, String, u32), String> {
         let host = cpal::default_host();
         let mut device = None;
         if !wanted.is_empty() {
@@ -131,7 +164,7 @@ impl AudioOut {
         .map_err(|e| format!("audio: {e}"))?;
         shared.stream_failed.store(false, Ordering::Relaxed);
         stream.play().map_err(|e| format!("audio: {e}"))?;
-        Ok(AudioOut { _stream: stream, device_name: name, device_rate: rate })
+        Ok((stream, name, rate))
     }
 }
 
