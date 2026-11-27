@@ -102,7 +102,13 @@ class TestDigitalAvailability {
     @Test
     fun whileHiddenDigitalStationsAreHeardInAnalogModes() {
         assertEquals(DigitalAvailability.NOT_IN_BUILD, availabilityOf(unlocked = false, DigitalAvailability.NOT_IN_BUILD, ExtensionConnectionState.DISCONNECTED))
-        assertEquals(DemodulationMode.FT8, DemodulationMode.FT8.shownOrAnalog(digitalShown = true))
+        // Richard's fork: the FOSS build shows only the modes its local decoders handle (DAB).
+        if (LocalDecoders.enabled) {
+            assertEquals(DemodulationMode.USB, DemodulationMode.FT8.shownOrAnalog(digitalShown = true))
+            assertEquals(DemodulationMode.DAB, DemodulationMode.DAB.shownOrAnalog(digitalShown = true))
+        } else {
+            assertEquals(DemodulationMode.FT8, DemodulationMode.FT8.shownOrAnalog(digitalShown = true))
+        }
         assertEquals(DemodulationMode.USB, DemodulationMode.FT8.shownOrAnalog(digitalShown = false))
         assertEquals(DemodulationMode.NFM, DemodulationMode.POCSAG.shownOrAnalog(digitalShown = false))
         assertNull(DemodulationMode.LORA.shownOrAnalog(digitalShown = false)) // no analog equivalent: keep the current mode

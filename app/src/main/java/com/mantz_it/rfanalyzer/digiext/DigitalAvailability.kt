@@ -55,7 +55,7 @@ import kotlinx.coroutines.flow.stateIn
  */
 object DigitalFeatures {
     /** Whether this build can have digital features at all (false: F-Droid). */
-    val inBuild: Boolean = !BuildConfig.IS_FOSS
+    val inBuild: Boolean = !BuildConfig.IS_FOSS || LocalDecoders.enabled
 
     private val shownState = mutableStateOf(false)
     private val _shownFlow = MutableStateFlow(false)
@@ -63,7 +63,7 @@ object DigitalFeatures {
     val shownFlow: StateFlow<Boolean> = _shownFlow
 
     fun update(extensionInstalled: Boolean) {
-        val shown = digitalFeaturesShown(inBuild, BuildConfig.DIGITAL_LAUNCHED, extensionInstalled)
+        val shown = LocalDecoders.enabled || digitalFeaturesShown(inBuild, BuildConfig.DIGITAL_LAUNCHED, extensionInstalled)
         shownState.value = shown
         _shownFlow.value = shown
     }
@@ -73,7 +73,8 @@ internal fun digitalFeaturesShown(inBuild: Boolean, launched: Boolean, extension
     inBuild && (launched || extensionInstalled)
 
 /** Whether [this] mode is offered (in mode lists, filters, the bookmark editor). */
-fun DemodulationMode.shown(digitalShown: Boolean = DigitalFeatures.shown): Boolean = !isDigitalExtension || digitalShown
+fun DemodulationMode.shown(digitalShown: Boolean = DigitalFeatures.shown): Boolean =
+    !isDigitalExtension || (digitalShown && (!LocalDecoders.enabled || LocalDecoders.decodes(this)))
 
 /** What a station of [this] mode is tuned with: itself, or while digital features are hidden, the
  *  analog mode its signal is heard with (null: keep the current mode). */

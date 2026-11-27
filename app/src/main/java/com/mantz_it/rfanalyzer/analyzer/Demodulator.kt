@@ -318,7 +318,7 @@ class Demodulator(
                     cwDemodulator.channelWidth = channelWidth
                     cwDemodulator.demodulate(quadratureSamples, audioBuffer)
                 }
-                DemodulationMode.RTTY, DemodulationMode.PSK31, DemodulationMode.R09, DemodulationMode.FT8, DemodulationMode.AX25, DemodulationMode.ADSB, DemodulationMode.POCSAG, DemodulationMode.LORA -> {
+                DemodulationMode.RTTY, DemodulationMode.PSK31, DemodulationMode.R09, DemodulationMode.FT8, DemodulationMode.AX25, DemodulationMode.ADSB, DemodulationMode.POCSAG, DemodulationMode.LORA, DemodulationMode.DAB -> {
                     pushDigitalExtensionInputSamples(quadratureSamples)
                     val pollSuccess = pollDigitalExtensionOutputSamples(audioBuffer)
                     if (!pollSuccess) GlobalPerformanceData.incrementCounter("demodulator.ipcPollMiss")

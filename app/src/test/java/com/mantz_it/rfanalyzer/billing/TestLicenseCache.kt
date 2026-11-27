@@ -1,5 +1,6 @@
 package com.mantz_it.rfanalyzer.billing
 
+import com.mantz_it.rfanalyzer.BuildConfig
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -62,7 +63,7 @@ class TestLicenseCache {
     fun aTrialStaysATrial() {
         val repository = appStateRepositoryWith("isFullVersion" to false)
         assertEquals(License.TRIAL, repository.license.value)
-        assertFalse(repository.isLicensed.value)
+        assertEquals(BuildConfig.IS_FOSS, repository.isLicensed.value) // FOSS: no time limit
     }
 
     @Test
@@ -70,6 +71,6 @@ class TestLicenseCache {
         val repository = appStateRepositoryWith("isBaseVersion" to true)
         assertEquals(License.BASE, repository.license.value)
         assertTrue(repository.isLicensed.value)
-        assertTrue(repository.digitalTrialRunning.value)
+        assertEquals(!BuildConfig.IS_FOSS, repository.digitalTrialRunning.value) // FOSS: no digital trial
     }
 }

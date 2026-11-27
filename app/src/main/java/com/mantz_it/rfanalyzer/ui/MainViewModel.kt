@@ -1,5 +1,6 @@
 package com.mantz_it.rfanalyzer.ui
 
+import com.mantz_it.rfanalyzer.digiext.LocalDecoders
 import com.mantz_it.rfanalyzer.source.RecordingFileName
 import com.mantz_it.rfanalyzer.source.KiwiSdrSource
 import com.mantz_it.rfanalyzer.location.CountrySource
@@ -1069,7 +1070,8 @@ class MainViewModel @Inject constructor(
             sendActionToUi(UiAction.OnStopClicked)
 
             // Show FOSS Donation Dialog (when the user presses Stop after a certain interval of app usage has passed):
-            if (BuildConfig.IS_FOSS) {
+            // Personal fork: no nag dialog after an hour of use.
+            if (BuildConfig.IS_FOSS && !LocalDecoders.enabled) {
                 val counter = appStateRepository.donationDialogCounter.value
                 val currentIntervalInSeconds = when (counter) {
                         0 -> 60 * 60          // 1 hour
@@ -1366,8 +1368,25 @@ class MainViewModel @Inject constructor(
         onChannelFrequencyChanged = { newChannelFrequency ->
             setChannelFrequency(newChannelFrequency)
         },
-        onTunerWheelDelta = { delta ->
-            val minimumStepSize = appStateRepository.tuneStepHz.value
+        onTunerWheelDelta = wheel@{ delta ->
+            // Richard's fork: in DAB mode the wheel steps through the Band III channels (they aren't evenly spaced).
+            if (appStateRepository.demodulationMode.value == DemodulationMode.DAB) {
+                val channels = com.mantz_it.rfanalyzer.addon.dab.DabChannels.bandIII
+                val current = appStateRepository.channelFrequency.value
+                val nearest = channels.indices.minBy { abs(channels[it].frequencyHz - current) }
+                val dir = (if (delta > 0) 1 else -1) * (if (appStateRepository.reverseTuningWheel.value) -1 else 1)
+                val target = when {
+                    abs(channels[nearest].frequencyHz - current) > 20_000 ->   // between channels: go to the next one in that direction
+                        if (dir > 0) channels.indexOfFirst { it.frequencyHz > current }.takeIf { it >= 0 } ?: channels.lastIndex
+                        else channels.indexOfLast { it.frequencyHz < current }.takeIf { it >= 0 } ?: 0
+                    else -> (nearest + dir).coerceIn(0, channels.lastIndex)
+                }
+                setChannelFrequency(channels[target].frequencyHz, askUser = false, onErrorMessage = { })
+                return@wheel
+            }
+            // A stored step the mode no longer offers (DAB's former 1.712 MHz) falls back to the mode's default, as the picker shows it.
+            val mode = appStateRepository.demodulationMode.value
+            val minimumStepSize = appStateRepository.tuneStepHz.value.takeIf { it in mode.tuneStepOptions } ?: mode.tuneStepDistance
             val absDelta = abs(delta)
             val factor = appStateRepository.viewportSampleRate.value / 1000f / minimumStepSize
             val amplification = factor * saturationFunction(x=absDelta-1, a=3f, k=5f)
@@ -1657,6 +1676,13 @@ class MainViewModel @Inject constructor(
     init {
         Log.d(TAG, "init: MainViewModel initializing...")
 
+        // Richard's fork: the DAB screens tune to a Band III channel through the Tuner.
+        com.mantz_it.rfanalyzer.addon.dab.LocalDab.tuner = { label, frequencyHz ->
+            tuner.tune(TuneTarget(label, DemodulationMode.DAB, frequencyHz, DemodulationMode.DAB.defaultChannelWidth)) {
+                startAnalyzerAfterTuneTo()
+            }
+        }
+
         // The Digital tab's shown mode follows the tuned digital mode (DigitalFilter): set while
         // unset and on every real mode change, so a mode picked in between lasts until the next
         // one; an analog mode keeps the last shown. previousMode/seenFirstMode tell a real change
@@ -1944,7 +1970,12 @@ class MainViewModel @Inject constructor(
             }
             return
         }
-        if (newChannelFrequency in appStateRepository.sourceSignalStartFrequency.value..appStateRepository.sourceSignalEndFrequency.value) {
+        // Richard's fork: DAB is decoded centred (the 1.536 MHz ensemble needs the whole band, and its centre carrier
+        // is null, so the DC spike does no harm): the source always retunes onto the channel.
+        val dabNeedsRetune = appStateRepository.demodulationMode.value == DemodulationMode.DAB &&
+            appStateRepository.sourceType.value != SourceType.FILESOURCE &&
+            newChannelFrequency != appStateRepository.sourceFrequency.value
+        if (!dabNeedsRetune && newChannelFrequency in appStateRepository.sourceSignalStartFrequency.value..appStateRepository.sourceSignalEndFrequency.value) {
             moveViewportToChannel(newChannelFrequency, jump = askUser)
             appStateRepository.channelFrequency.set(newChannelFrequency)
             if (onSuccess != null) onSuccess()
@@ -1956,7 +1987,7 @@ class MainViewModel @Inject constructor(
                 // Avoid the DC peak by not tuning directly to the channel, but keep the whole channel
                 // inside the received signal (a wide channel's 2x offset can exceed half the sample rate).
                 val sampleRate = appStateRepository.sourceSampleRate.value
-                val dcOffset = if (!appStateRepository.sourceType.value.hasDcSpike) 0L
+                val dcOffset = if (!appStateRepository.sourceType.value.hasDcSpike || appStateRepository.demodulationMode.value == DemodulationMode.DAB) 0L
                     else minOf(2L * newChannelWidth, (sampleRate - newChannelWidth) / 2).coerceAtLeast(0)
                 val newSourceFrequency = (newChannelFrequency + dcOffset)
                     .coerceIn(appStateRepository.sourceMinimumFrequency.value, appStateRepository.sourceMaximumFrequency.value)

@@ -376,7 +376,7 @@ class AnalyzerSurface(context: Context,
         DemodulationMode.OFF -> 0.995f
         DemodulationMode.AM, DemodulationMode.NFM, DemodulationMode.AX25, DemodulationMode.POCSAG -> 0.7f
         DemodulationMode.WFM, DemodulationMode.LORA -> 0.45f
-        DemodulationMode.ADSB -> 0.45f
+        DemodulationMode.ADSB, DemodulationMode.DAB -> 0.45f
         DemodulationMode.LSB, DemodulationMode.USB -> 0.95f
         DemodulationMode.CW, DemodulationMode.RTTY, DemodulationMode.PSK31, DemodulationMode.R09, DemodulationMode.FT8 -> 0.997f
     }

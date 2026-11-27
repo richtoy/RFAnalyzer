@@ -48,6 +48,20 @@ class TestTuning {
         assertTrue(t.viewportFrequency + t.viewportSpan / 2 <= t.sourceFrequency + t.sampleRate / 2)
     }
 
+    /** Richard's fork: DAB is decoded centred, so the source always moves onto the channel. */
+    @Test
+    fun dabCentresTheSourceOnTheChannel() {
+        val dab7c = TuneTarget("DAB 7C", DemodulationMode.DAB, 192_352_000, 1_536_000)
+        // HackRF at 8 Msps around 191 MHz: 7C is visible and received, but still off centre
+        val t = tune(dab7c, hackrf, view(8_000_000, 191_000_000))
+        assertEquals(192_352_000L, t.sourceFrequency)
+        assertEquals(192_352_000L, t.channelFrequency)
+        // RTL-SDR: the native 2.048 Msps is enough, no DC offset
+        val r = tune(dab7c, rtlsdr, view(1_000_000, 100_000_000))
+        assertEquals(2_048_000L, r.sampleRate)
+        assertEquals(192_352_000L, r.sourceFrequency)
+    }
+
     @Test
     fun aStationInsideTheViewportMovesNothingButTheChannel() {
         // 2 MHz viewport around 145 MHz shows APRS at 144.8 MHz: a tap on its label tunes, nothing moves

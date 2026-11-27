@@ -53,7 +53,7 @@ class RtlsdrSource : UsbSdrSource<RtlSdrDevice>(UsbSdrType.RTLSDR, TAG, Unsigned
         // let Automatic Sample Rate go lower when zooming in. Not below 1 Msps: one 256 KiB USB
         // transfer would hold ~0.5 s at 250 kSps (a bursty waterfall, that much audio latency).
         // The first entry is a fresh install's rate; rtl_tcp uses the first and last as its range.
-        val OPTIMAL_SAMPLE_RATES = intArrayOf(1000000, 1400000, 1800000, 2000000, 2400000, 2500000)
+        val OPTIMAL_SAMPLE_RATES = intArrayOf(1000000, 1400000, 1800000, 2000000, 2048000, 2400000, 2500000)
     }
 
     // Queried from the opened device (onDeviceOpened).

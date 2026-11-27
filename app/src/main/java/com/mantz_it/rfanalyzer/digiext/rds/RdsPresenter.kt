@@ -1,5 +1,8 @@
 package com.mantz_it.rfanalyzer.digiext.rds
 
+import com.mantz_it.rfanalyzer.addon.ui.RdsAddonDetails
+import com.mantz_it.rfanalyzer.addon.ui.RdsSignalPanel
+import com.mantz_it.rfanalyzer.digiext.LocalDecoders
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
@@ -132,6 +135,7 @@ class RdsPresenter(
     @Composable
     override fun DetailsContent(item: TrackedObject<RdsStation>, nowMs: Long) {
         DetailsGroup("Station") { Fields(facts(item, nowMs)) }
+        if (LocalDecoders.enabled && item.state.isLive(nowMs)) DetailsGroup("Signal & decoder") { RdsSignalPanel(); RdsAddonDetails() }
         DetailsGroup("Received") { StationSections(item) }
     }
 
@@ -229,7 +233,10 @@ internal fun rdsOverviewSection(
     },
     ticker = {
         val tuned by tunedStation.collectAsState(null)
-        RdsTicker(station = tuned?.takeIf { it.state.isLive(nowMs) }, context = context, lines = lines)
+        Column {
+            RdsTicker(station = tuned?.takeIf { it.state.isLive(nowMs) }, context = context, lines = lines)
+            if (LocalDecoders.enabled) RdsSignalPanel()
+        }
     },
 )
 
