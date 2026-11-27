@@ -34,6 +34,8 @@ pub struct Scan {
     pub phase: ScanPhase,
     pub t0: f64,
     pub previous_channel: String,
+    /// false when this step's channel was already tuned, so no fresh tune will come
+    pub retune: bool,
 }
 
 pub struct RfaApp {
@@ -93,6 +95,9 @@ pub struct RfaApp {
     auto_lna_step: i32,
     auto_quit: bool,
     auto_next_at: f64,
+    audio_retry_at: f64,
+    next_settings_check: f64,
+    saved_settings: String,
 }
 
 pub fn icon() -> egui::IconData {
@@ -116,7 +121,12 @@ pub fn icon() -> egui::IconData {
 
 impl RfaApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let s: Settings = cc.storage.and_then(|st| eframe::get_value(st, "settings")).unwrap_or_default();
+        // settings.json (written on every change) wins over eframe's store
+        let s: Settings = crate::config_dir()
+            .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
+            .and_then(|js| serde_json::from_str(&js).ok())
+            .or_else(|| cc.storage.and_then(|st| eframe::get_value(st, "settings")))
+            .unwrap_or_default();
         let audio = AudioShared::new();
         let ctx = cc.egui_ctx.clone();
         let engine = Engine::spawn(audio.clone(), move || ctx.request_repaint());
@@ -180,6 +190,9 @@ impl RfaApp {
             auto_lna_step: 0,
             auto_quit: false,
             auto_next_at: 0.0,
+            audio_retry_at: 0.0,
+            next_settings_check: 0.0,
+            saved_settings: String::new(),
             s,
         };
         app.engine.send(Cmd::DabRemembered(app.s.dab_last_service.clone()));
@@ -255,6 +268,47 @@ impl RfaApp {
 
     pub fn now(&self) -> f64 {
         self.start_time.elapsed().as_secs_f64()
+    }
+
+    pub fn reopen_audio(&mut self) {
+        self.audio_out = None;
+        match AudioOut::open(self.audio.clone(), &self.s.audio_device) {
+            Ok(a) => {
+                self.audio_out = Some(a);
+                self.audio_error = None;
+            }
+            Err(e) => self.audio_error = Some(e),
+        }
+    }
+
+    /// Rebuilds the audio stream after the device changed or went away (WASAPI invalidates it),
+    /// retrying every 2 s while it fails.
+    fn check_audio(&mut self) {
+        let failed = self.audio.stream_failed.load(std::sync::atomic::Ordering::Relaxed);
+        let missing = self.audio_out.is_none();
+        if (failed || missing) && self.now() >= self.audio_retry_at {
+            self.audio_retry_at = self.now() + 2.0;
+            self.reopen_audio();
+        }
+    }
+
+    /// Writes the settings to %APPDATA%\\RFAnalyzer\\settings.json whenever they change, so they
+    /// survive even if the app is killed or eframe's own store isn't written.
+    fn autosave_settings(&mut self) {
+        if self.now() < self.next_settings_check {
+            return;
+        }
+        self.next_settings_check = self.now() + 2.0;
+        let Ok(js) = serde_json::to_string_pretty(&self.s) else { return };
+        if js == self.saved_settings {
+            return;
+        }
+        if let Some(dir) = crate::config_dir() {
+            let tmp = dir.join("settings.json.tmp");
+            if std::fs::write(&tmp, &js).is_ok() && std::fs::rename(&tmp, dir.join("settings.json")).is_ok() {
+                self.saved_settings = js;
+            }
+        }
     }
 
     pub fn toast(&mut self, msg: impl Into<String>) {
@@ -499,7 +553,8 @@ impl RfaApp {
         let channels = model::scan_list();
         self.scan_state = DabScanState { running: true, count: channels.len(), ..Default::default() };
         let first = channels[0].name.to_string();
-        self.scan = Some(Scan { channels, index: 0, phase: ScanPhase::Tuning, t0: self.now(), previous_channel: self.s.dab_channel.clone() });
+        let retune = self.needs_retune(channels[0].freq);
+        self.scan = Some(Scan { channels, index: 0, phase: ScanPhase::Tuning, t0: self.now(), previous_channel: self.s.dab_channel.clone(), retune });
         self.set_dab_channel(first);
     }
 
@@ -515,6 +570,15 @@ impl RfaApp {
         self.auto_scans -= 1;
         self.start_scan();
         self.auto_next_at = 0.0;
+    }
+
+    /// Whether tuning to `freq` will give the DAB receiver a fresh start (it only restarts when the
+    /// channel moves by more than 100 kHz).
+    fn needs_retune(&self, freq: u64) -> bool {
+        match &self.dab {
+            Some(d) if d.active => d.frequency.abs_diff(freq) > 100_000,
+            _ => true,
+        }
     }
 
     pub fn stop_scan(&mut self) {
@@ -537,7 +601,7 @@ impl RfaApp {
         match scan.phase {
             ScanPhase::Tuning => {
                 // tuned since this step began (the age is only refreshed every 0.5 s)
-                if on_channel && (st.seconds_since_tune as f64) < el + 0.6 {
+                if on_channel && (!scan.retune || (st.seconds_since_tune as f64) < el + 0.6) {
                     scan.phase = ScanPhase::WaitSync;
                     scan.t0 = now;
                 } else if el > 4.0 {
@@ -615,6 +679,10 @@ impl RfaApp {
                     self.toast("Scan finished: nothing found. Check the antenna and gain.");
                 }
             } else {
+                let f = scan.channels[scan.index].freq;
+                let retune = self.needs_retune(f);
+                let scan = self.scan.as_mut().unwrap();
+                scan.retune = retune;
                 scan.phase = ScanPhase::Tuning;
                 scan.t0 = now;
                 let name = scan.channels[scan.index].name.to_string();
@@ -957,6 +1025,8 @@ impl eframe::App for RfaApp {
         self.apply_look(&ctx);
         self.poll_status(&ctx);
         self.shortcuts(&ctx);
+        self.check_audio();
+        self.autosave_settings();
         self.scan_step();
         self.auto_scan_step();
         if self.auto_next_at < 0.0 && self.scan.is_none() {
@@ -984,6 +1054,8 @@ impl eframe::App for RfaApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "settings", &self.s);
+        self.next_settings_check = 0.0;
+        self.autosave_settings();
     }
 
     fn on_exit(&mut self) {

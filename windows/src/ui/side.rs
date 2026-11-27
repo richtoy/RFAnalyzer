@@ -266,14 +266,7 @@ impl RfaApp {
         });
         if let Some(d) = chosen {
             self.s.audio_device = d;
-            self.audio_out = None;
-            match crate::audio::AudioOut::open(self.audio.clone(), &self.s.audio_device) {
-                Ok(a) => {
-                    self.audio_out = Some(a);
-                    self.audio_error = None;
-                }
-                Err(e) => self.audio_error = Some(e),
-            }
+            self.reopen_audio();
         }
     }
 

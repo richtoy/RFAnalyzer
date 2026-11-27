@@ -18,6 +18,8 @@ pub struct AudioShared {
     pub overruns: AtomicU32,
     /// Peak level of the last callback (f32 bits), for the meter
     pub level: AtomicU32,
+    /// Set by the stream's error callback (device removed or reconfigured): reopen the output
+    pub stream_failed: AtomicBool,
 }
 
 impl AudioShared {
@@ -29,6 +31,7 @@ impl AudioShared {
             underruns: AtomicU32::new(0),
             overruns: AtomicU32::new(0),
             level: AtomicU32::new(0),
+            stream_failed: AtomicBool::new(false),
         })
     }
     pub fn push(&self, samples: &[[f32; 2]]) {
@@ -93,7 +96,11 @@ impl AudioOut {
         let config: cpal::StreamConfig = supported.into();
         let rate = config.sample_rate;
         let channels = config.channels as usize;
-        let err_fn = |e: cpal::Error| eprintln!("audio stream error: {e}");
+        let failed = shared.clone();
+        let err_fn = move |e: cpal::Error| {
+            eprintln!("audio stream error: {e}");
+            failed.stream_failed.store(true, Ordering::Relaxed);
+        };
         let mut state = Resampler::new(IN_RATE / rate as f64);
         let sh = shared.clone();
         let stream = match format {
@@ -118,6 +125,7 @@ impl AudioOut {
             other => return Err(format!("audio: unsupported sample format {other:?}")),
         }
         .map_err(|e| format!("audio: {e}"))?;
+        shared.stream_failed.store(false, Ordering::Relaxed);
         stream.play().map_err(|e| format!("audio: {e}"))?;
         Ok(AudioOut { _stream: stream, device_name: name, device_rate: rate })
     }
