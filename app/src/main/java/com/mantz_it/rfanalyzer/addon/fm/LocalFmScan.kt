@@ -409,10 +409,16 @@ object LocalFmScan {
                     }
                 }
             }
-            // No RDS, no pilot and no carrier when actually tuned: something the survey saw that isn't
-            // there (a leftover frame or a mirror image the median/minimum didn't catch). Drop it.
-            if (!p.rds && !p.stereo && p.levelDb < floor + cfg.thresholdDb / 2) {
-                note(String.format(Locale.US, "%6.1f MHz  dropped: no carrier when tuned (level %.1f dB, floor %.1f dB)", p.frequencyMhz, p.levelDb, floor))
+            // A candidate without RDS must still be there when actually tuned. Real stations read
+            // within a dB or two of their survey level when tuned (seen on the phone: 93.4 -38.6/-38.6,
+            // 99.9 -61.6/-61.0); survey artifacts (a mirror image, an intermodulation product or a
+            // leftover frame the checks didn't catch) read far lower (102.8 -56/-72, 105.7 -55/-72).
+            val surveyLevel = floor + snr
+            val vanished = p.levelDb < surveyLevel - 8f
+            val noCarrier = !p.stereo && p.levelDb < floor + cfg.thresholdDb / 2
+            if (!p.rds && (vanished || noCarrier)) {
+                note(String.format(Locale.US, "%6.1f MHz  dropped: %s (survey %.1f dB, tuned %.1f dB, floor %.1f dB)",
+                    p.frequencyMhz, if (vanished) "not confirmed when tuned" else "no carrier when tuned", surveyLevel, p.levelDb, floor))
                 continue
             }
             note(presetLogLine(p))
