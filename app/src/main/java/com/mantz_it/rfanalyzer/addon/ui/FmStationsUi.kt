@@ -23,6 +23,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -65,7 +66,10 @@ fun FmStationsPanel(channelFrequency: Long, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { LocalFmScan.init(context) }
     val status by LocalFmScan.status.collectAsState()
-    val presets by LocalFmScan.presets.collectAsState()
+    val allPresets by LocalFmScan.presets.collectAsState()
+    val showWeak by LocalFmScan.showWeak.collectAsState()
+    val presets = if (showWeak) allPresets else allPresets.filter { !LocalFmScan.isWeak(it) }
+    val hidden = allPresets.size - presets.size
     var showLog by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<FmPreset?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
@@ -110,10 +114,21 @@ fun FmStationsPanel(channelFrequency: Long, modifier: Modifier = Modifier) {
                 Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             }
         }
-        if (!status.running && presets.isEmpty()) Text(
+        if (!status.running && allPresets.isEmpty()) Text(
             "No stations yet. \"Scan FM band\" surveys 87.5-108 MHz, then checks each carrier for stereo and RDS (a few minutes). Stereo & RDS is switched on for it.",
             style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp),
         )
+        if (allPresets.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("Show weak stations", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (showWeak) "Stations without usable RDS and less than ${LocalFmScan.WEAK_SNR_DB.toInt()} dB above the noise are listed too."
+                    else "$hidden weak station${if (hidden == 1) "" else "s"} hidden (no usable RDS, less than ${LocalFmScan.WEAK_SNR_DB.toInt()} dB above the noise).",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Switch(checked = showWeak, onCheckedChange = { LocalFmScan.setShowWeak(it) })
+        }
         if (presets.isNotEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
                 Text(

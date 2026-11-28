@@ -227,5 +227,14 @@ class FmScanCoreTest {
         for (i in 0 until 200) fixed.observe(i * 0.05, "L1 RADIO", "")
         assertFalse(fixed.scrolling)
     }
+
+    @Test
+    fun weakStationsAreThoseWithoutUsableRdsAndLowSignal() {
+        val w = com.mantz_it.rfanalyzer.addon.fm.LocalFmScan
+        assertTrue(w.isWeak(FmPreset(99_900_000, snrDb = 16f)))                                   // no RDS, weak
+        assertFalse(w.isWeak(FmPreset(93_400_000, snrDb = 40f)))                                  // no RDS, strong
+        assertFalse(w.isWeak(FmPreset(94_300_000, snrDb = 13f, rds = true, pi = 0x83F2, bler = 0f))) // weak but clean RDS
+        assertTrue(w.isWeak(FmPreset(101_400_000, snrDb = 15f, rds = true, pi = 0x6304, bler = 0.6f))) // poor RDS, weak
+    }
 }
 

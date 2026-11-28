@@ -134,6 +134,8 @@ object LocalFmScan {
     private const val STALE_FALLBACK_MS = 2500L
     /** Longest time on a station whose PS scrolls, waiting to see a whole cycle of its name. */
     private const val SCROLL_MAX_SECS = 25.0
+    /** Below this SNR a station without usable RDS counts as weak ([isWeak]). */
+    const val WEAK_SNR_DB = 20f
     /** While verifying: the channel being checked, and its level in each frame. */
     @Volatile private var verifyFrequency = 0L
     private val verifyLevels = ArrayList<Float>()
@@ -146,6 +148,7 @@ object LocalFmScan {
         prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         logFile = File(context.applicationContext.filesDir, "fm_scan_log.txt")
         _presets.value = load()
+        _showWeak.value = prefs?.getBoolean("show_weak", true) ?: true
     }
 
     // ------------------------------------------------------------------ taps
@@ -242,13 +245,32 @@ object LocalFmScan {
 
     /** Tunes the next ([dir] > 0) or previous preset from the current channel, wrapping around. */
     fun stepPreset(dir: Int) {
-        val list = _presets.value
+        val list = _presets.value.filter { _showWeak.value || !isWeak(it) }
         val r = radio ?: return
         if (list.isEmpty()) return
         val ch = r.channelFrequency()
         val next = if (dir > 0) list.firstOrNull { it.frequencyHz > ch + 25_000 } ?: list.first()
         else list.lastOrNull { it.frequencyHz + 25_000 < ch } ?: list.last()
         tunePreset(next.frequencyHz)
+    }
+
+    /** Whether the stations list (and the prev/next buttons) include weak stations ([isWeak]). */
+    private val _showWeak = MutableStateFlow(true)
+    val showWeak: StateFlow<Boolean> = _showWeak.asStateFlow()
+
+    fun setShowWeak(show: Boolean) {
+        _showWeak.value = show
+        prefs?.edit()?.putBoolean("show_weak", show)?.apply()
+    }
+
+    /**
+     * A weak station: no usable RDS (none, or more than half the blocks failing) and a signal less
+     * than [WEAK_SNR_DB] above the noise floor. On the phone these are the distant transmitters that
+     * sound noisy (e.g. 99.9, 101.4, 102.5 at 12-19 dB); strong stations without RDS are kept.
+     */
+    fun isWeak(p: FmPreset): Boolean {
+        val goodRds = p.rds && (p.bler ?: 1f) < 0.5f
+        return !goodRds && p.snrDb < WEAK_SNR_DB
     }
 
     /** The preset at the current channel frequency, if any. */
