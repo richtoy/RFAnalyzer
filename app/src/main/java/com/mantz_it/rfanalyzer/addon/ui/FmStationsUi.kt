@@ -26,6 +26,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -35,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,6 +70,13 @@ fun FmStationsPanel(channelFrequency: Long, modifier: Modifier = Modifier) {
     var editing by remember { mutableStateOf<FmPreset?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     val current = presets.firstOrNull { kotlin.math.abs(it.frequencyHz - channelFrequency) < 50_000 }
+    // Keep the screen on while a scan runs: with the screen off Android may slow the app down, and
+    // the progress stays visible. Released when the scan ends or the panel goes away.
+    val view = LocalView.current
+    DisposableEffect(status.running) {
+        view.keepScreenOn = status.running
+        onDispose { view.keepScreenOn = false }
+    }
 
     Column(
         modifier
