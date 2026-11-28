@@ -207,4 +207,25 @@ class FmScanCoreTest {
         assertEquals(-40f, out[8], 0.01f)
         assertEquals(-60f, out[4], 0.01f)
     }
+
+    @Test
+    fun scrollingNameIsDetectedAndCycleCompletes() {
+        val tr = PsTrack()
+        var cycleAt = -1.0
+        // NPO 5 s, KLASSIEK 1.6 s, repeating; the check starts on NPO
+        for (i in 0 until 400) {
+            val t = i * 0.05
+            tr.observe(t, if (t % 6.6 < 5.0) "NPO     " else "KLASSIEK", "")
+            if (tr.cycleSeen && cycleAt < 0) cycleAt = t
+        }
+        assertTrue(tr.scrolling)
+        // NPO stable at 1 s, KLASSIEK at 6, NPO back at 7.6: the whole name has been seen by ~8 s
+        assertTrue("cycle at $cycleAt", cycleAt in 7.0..9.0)
+        assertEquals("NPO KLASSIEK", tr.name())
+        // a fixed name never counts as scrolling
+        val fixed = PsTrack()
+        for (i in 0 until 200) fixed.observe(i * 0.05, "L1 RADIO", "")
+        assertFalse(fixed.scrolling)
+    }
 }
+

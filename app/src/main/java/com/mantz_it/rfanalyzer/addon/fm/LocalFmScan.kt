@@ -132,6 +132,8 @@ object LocalFmScan {
     private var skipFrames = 0
     /** How long frames may stay stale before they are used anyway (a retune that changes nothing visible). */
     private const val STALE_FALLBACK_MS = 2500L
+    /** Longest time on a station whose PS scrolls, waiting to see a whole cycle of its name. */
+    private const val SCROLL_MAX_SECS = 25.0
     /** While verifying: the channel being checked, and its level in each frame. */
     @Volatile private var verifyFrequency = 0L
     private val verifyLevels = ArrayList<Float>()
@@ -480,7 +482,12 @@ object LocalFmScan {
             val rdsSeen = snap.pi != null
             if (rdsSeen && blocksAtPi == null && abs(m.frequencyHz - freq) < 20_000) blocksAtPi = Triple(m.blocksOk, m.blocksCorrected, m.blocksFailed)
             if (track.observe(t, if (rdsSeen) snap.ps else "", snap.rt) && psAt == null) psAt = t
-            val done = (!rdsSeen && t >= noRdsWait) || (psAt != null && t >= psAt!! + 4.5) || t >= max
+            // A scrolling name ("NPO" / "KLASSIEK") needs a whole cycle: listen until the first page
+            // has come back (cycleSeen), up to SCROLL_MAX_SECS, so a briefly shown page isn't missed.
+            val scrolling = track.scrolling
+            val cap = if (scrolling) maxOf(max, SCROLL_MAX_SECS) else max
+            val psDone = psAt != null && t >= psAt!! + 4.5 && (!scrolling || track.cycleSeen)
+            val done = (!rdsSeen && t >= noRdsWait) || psDone || t >= cap
             if (done) break
         }
         verifyFrequency = 0L

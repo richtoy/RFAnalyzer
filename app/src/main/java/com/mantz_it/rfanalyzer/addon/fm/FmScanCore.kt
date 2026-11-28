@@ -283,6 +283,18 @@ class PsTrack {
     var rt = ""
         private set
     private var lastT = 0.0
+    /** How often the PS changed after the first stable page (> 0: a scrolling or changing name). */
+    var psChanges = 0
+        private set
+
+    /** The station sends more than one PS (a scrolling name such as "NPO" / "KLASSIEK"). */
+    val scrolling: Boolean get() = psChanges > 0 || pages.size > 1
+
+    /**
+     * A whole cycle of a scrolling PS was seen: the first stable page came back after the others,
+     * so every page of the name has had its turn.
+     */
+    val cycleSeen: Boolean get() = pages.size >= 2 && pages[0].episodes >= 2
 
     /**
      * Called on every poll at time [t] (seconds) with the current raw PS (8 characters, untrimmed
@@ -310,6 +322,8 @@ class PsTrack {
                     }
                 }
             } else {
+                // the PS changed after a page had already been stable: the station scrolls its name
+                if (pages.isNotEmpty()) psChanges++
                 lastPs = ps
                 lastPsSince = t
                 psCounted = false
