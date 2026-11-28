@@ -200,6 +200,46 @@ fun profileChanged(before: FloatArray, now: FloatArray, thresholdDb: Float = 6f,
     return n >= minBlocks
 }
 
+/**
+ * A survey window's level per grid channel: the median over its [frames] (each frame a row of
+ * per-channel levels, NaN where the frame doesn't measure that channel). The median ignores the odd
+ * stray frame; NaN for a channel no frame measured.
+ */
+fun windowMedians(frames: List<FloatArray>, channels: Int): FloatArray {
+    val out = FloatArray(channels) { Float.NaN }
+    val v = FloatArray(frames.size)
+    for (k in 0 until channels) {
+        var m = 0
+        for (row in frames) if (!row[k].isNaN()) v[m++] = row[k]
+        if (m == 0) continue
+        v.sort(0, m)
+        out[k] = if (m % 2 == 1) v[m / 2] else (v[m / 2 - 1] + v[m / 2]) / 2
+    }
+    return out
+}
+
+/**
+ * Removes (sets NaN) the readings of a window that are likely mirror images. An SDR with IQ
+ * imbalance (the HackRF) shows every station also at the same distance on the other side of the
+ * window centre, 25-40 dB weaker. A channel whose mirror channel ([centerHz] - offset) is at least
+ * [rejectDb] stronger can't be told from that image in this window, so this window's reading of it
+ * is dropped. Windows overlap, so the channel is normally measured again in another window, where
+ * its mirror is elsewhere: a real station there still counts, an image doesn't.
+ */
+fun rejectMirrors(med: FloatArray, grid: LongArray, centerHz: Long, rejectDb: Float = 20f): FloatArray {
+    val out = med.copyOf()
+    if (grid.size < 2) return out
+    val step = grid[1] - grid[0]
+    for (k in grid.indices) {
+        if (med[k].isNaN()) continue
+        val mirror = 2 * centerHz - grid[k]
+        val j = Math.round((mirror - grid[0]).toDouble() / step).toInt()
+        if (j == k || j !in grid.indices || med[j].isNaN()) continue
+        if (med[j] - med[k] >= rejectDb) out[k] = Float.NaN
+    }
+    return out
+}
+
 /** Pads/cuts a PS to its 8 character positions. */
 private fun pad8(s: String): CharArray = CharArray(8) { if (it < s.length) s[it] else ' ' }
 

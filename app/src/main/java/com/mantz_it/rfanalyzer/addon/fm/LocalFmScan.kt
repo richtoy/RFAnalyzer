@@ -107,12 +107,14 @@ object LocalFmScan {
         private set
     private var grid = LongArray(0)
     /**
-     * Level per grid channel (dB), NaN until measured: per window the median over its frames, and
-     * over windows the lowest of those (see [finishWindow]).
+     * Level per grid channel (dB), NaN until measured: per window the median over its fresh frames
+     * (mirror images removed), and over windows the loudest of those (see [finishWindow]).
      */
     private var levels = FloatArray(0)
     /** The current window's frames: per frame the level of each grid channel (NaN = not measured). */
     private val windowFrames = ArrayList<FloatArray>()
+    /** The centre frequency the current window's frames were taken at (for the mirror check). */
+    private var windowCenterHz = 0L
     private var dbScratch = FloatArray(0)
     /** Frames are used only after this time (the hardware retunes and the FFT settles). */
     @Volatile private var acceptFramesAfterMs = Long.MAX_VALUE
@@ -184,6 +186,7 @@ object LocalFmScan {
             val (dc, edge) = if (liveSource) Pair(FmSurvey.DC * r, FmSurvey.EDGE * r) else Pair(0.0, 0.45 * r)
             val row = FloatArray(grid.size) { k -> levelAt(dbScratch, n, c, r, grid[k].toDouble(), dc, edge) ?: Float.NaN }
             windowFrames += row
+            windowCenterHz = frequency
         }
     }
 
@@ -202,27 +205,22 @@ object LocalFmScan {
     private fun freshForMs(): Long = synchronized(lock) { if (fresh) System.currentTimeMillis() - freshSinceMs else -1L }
 
     /**
-     * Ends a survey window: each channel's level in it is the median over its frames, and a
-     * channel's level over the whole survey the lowest of its windows' medians.
+     * Ends a survey window. Its frames are all fresh (stale ones were skipped, see [markRetune]);
+     * each channel's level in the window is the median over them ([windowMedians]), readings that
+     * may be mirror images of a much stronger station across the window centre are dropped
+     * ([rejectMirrors]), and a channel's survey level is the loudest of its windows' levels.
      *
-     * Why not the loudest reading: (1) when the source is retuned, FftProcessor takes the new
-     * frequency at once, but the frames right after it are still computed from samples received
-     * before the retune, so they show every station shifted by one window; (2) a strong station
-     * leaves a mirror image (IQ imbalance, seen on the HackRF) at the same distance on the other side
-     * of the window centre. Both are in few frames or only in some windows, while a real carrier is
-     * in every frame of every window that covers its channel (windows overlap, so most channels are
-     * measured twice). Keeping the loudest reading turned them into "stations" that were only noise.
+     * (An earlier version kept the lowest of the windows' levels to suppress stale frames and mirror
+     * images; on a phone with a HackRF that also dropped real stations, since levels vary between
+     * windows. Stale frames are now skipped at the source and images checked explicitly.)
      */
     private fun finishWindow() = synchronized(lock) {
-        val frames = windowFrames.size
+        if (windowFrames.isEmpty()) return@synchronized
+        val med = rejectMirrors(windowMedians(windowFrames, grid.size), grid, windowCenterHz)
         for (k in grid.indices) {
-            val v = FloatArray(frames)
-            var m = 0
-            for (row in windowFrames) if (!row[k].isNaN()) v[m++] = row[k]
-            if (m == 0) continue
-            v.sort(0, m)
-            val med = if (m % 2 == 1) v[m / 2] else (v[m / 2 - 1] + v[m / 2]) / 2
-            levels[k] = if (levels[k].isNaN()) med else minOf(levels[k], med)
+            val m = med[k]
+            if (m.isNaN()) continue
+            if (levels[k].isNaN() || m > levels[k]) levels[k] = m
         }
         windowFrames.clear()
     }

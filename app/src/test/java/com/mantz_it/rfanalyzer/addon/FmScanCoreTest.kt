@@ -10,6 +10,8 @@ import com.mantz_it.rfanalyzer.addon.fm.levelAt
 import com.mantz_it.rfanalyzer.addon.fm.markSamePi
 import com.mantz_it.rfanalyzer.addon.fm.pickCandidates
 import com.mantz_it.rfanalyzer.addon.fm.profileChanged
+import com.mantz_it.rfanalyzer.addon.fm.rejectMirrors
+import com.mantz_it.rfanalyzer.addon.fm.windowMedians
 import com.mantz_it.rfanalyzer.addon.fm.spectrumProfile
 import com.mantz_it.rfanalyzer.addon.fm.psDistance
 import com.mantz_it.rfanalyzer.addon.fm.rdsCountry
@@ -182,5 +184,27 @@ class FmScanCoreTest {
         assertFalse(profileChanged(before, spectrumProfile(frame(500), 2048)))
         // the station moved by a survey step (about a quarter of the span): changed
         assertTrue(profileChanged(before, spectrumProfile(frame(1050), 2048)))
+    }
+
+    @Test
+    fun medianIgnoresAStrayFrame() {
+        val frames = listOf(floatArrayOf(-90f, -40f), floatArrayOf(-90f, -41f), floatArrayOf(-50f, -40f))
+        val m = windowMedians(frames, 2)
+        assertEquals(-90f, m[0], 0.01f)
+        assertEquals(-40f, m[1], 0.01f)
+    }
+
+    @Test
+    fun mirrorImagesAreRejected() {
+        // grid 99.0..100.0 MHz, window centre 99.5: a strong station at 99.8 and its image at 99.2
+        val grid = LongArray(11) { 99_000_000L + it * 100_000 }
+        val med = FloatArray(11) { -95f }
+        med[8] = -40f           // 99.8, the station
+        med[2] = -70f           // 99.2, its image 30 dB down
+        med[4] = -60f           // 99.4, a real weak station; its mirror 99.6 is empty
+        val out = rejectMirrors(med, grid, 99_500_000L)
+        assertTrue(out[2].isNaN())
+        assertEquals(-40f, out[8], 0.01f)
+        assertEquals(-60f, out[4], 0.01f)
     }
 }
