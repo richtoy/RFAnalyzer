@@ -106,17 +106,20 @@ object LocalFmScan {
     @Volatile var frameWanted = false
         private set
     private var grid = LongArray(0)
-    /** Best level per grid channel (dB), NaN until measured. */
+    /**
+     * Level per grid channel (dB), NaN until measured: per window the median over its frames, and
+     * over windows the lowest of those (see [finishWindow]).
+     */
     private var levels = FloatArray(0)
+    /** The current window's frames: per frame the level of each grid channel (NaN = not measured). */
+    private val windowFrames = ArrayList<FloatArray>()
     private var dbScratch = FloatArray(0)
     /** Frames are used only after this time (the hardware retunes and the FFT settles). */
     @Volatile private var acceptFramesAfterMs = Long.MAX_VALUE
-    private var framesUsed = 0
     private var liveSource = true
-    /** While verifying: the channel being checked, and the running sum of its level. */
+    /** While verifying: the channel being checked, and its level in each frame. */
     @Volatile private var verifyFrequency = 0L
-    private var levelSum = 0.0
-    private var levelN = 0
+    private val verifyLevels = ArrayList<Float>()
 
     // --- RDS of the station being checked (written by the Demodulator thread) ---
     private val stationRds = FmStationRds()
@@ -144,16 +147,39 @@ object LocalFmScan {
             val f = verifyFrequency
             if (f != 0L) {
                 // verifying: the channel's own level, anywhere in the frame
-                levelAt(dbScratch, n, c, r, f.toDouble(), 0.0, 0.45 * r)?.let { levelSum += it; levelN++ }
+                levelAt(dbScratch, n, c, r, f.toDouble(), 0.0, 0.45 * r)?.let { verifyLevels += it }
                 return
             }
             val (dc, edge) = if (liveSource) Pair(FmSurvey.DC * r, FmSurvey.EDGE * r) else Pair(0.0, 0.45 * r)
-            for (k in grid.indices) {
-                val l = levelAt(dbScratch, n, c, r, grid[k].toDouble(), dc, edge) ?: continue
-                if (levels[k].isNaN() || l > levels[k]) levels[k] = l
-            }
-            framesUsed++
+            val row = FloatArray(grid.size) { k -> levelAt(dbScratch, n, c, r, grid[k].toDouble(), dc, edge) ?: Float.NaN }
+            windowFrames += row
         }
+    }
+
+    /**
+     * Ends a survey window: each channel's level in it is the median over its frames, and a
+     * channel's level over the whole survey the lowest of its windows' medians.
+     *
+     * Why not the loudest reading: (1) when the source is retuned, FftProcessor takes the new
+     * frequency at once, but the frames right after it are still computed from samples received
+     * before the retune, so they show every station shifted by one window; (2) a strong station
+     * leaves a mirror image (IQ imbalance, seen on the HackRF) at the same distance on the other side
+     * of the window centre. Both are in few frames or only in some windows, while a real carrier is
+     * in every frame of every window that covers its channel (windows overlap, so most channels are
+     * measured twice). Keeping the loudest reading turned them into "stations" that were only noise.
+     */
+    private fun finishWindow() = synchronized(lock) {
+        val frames = windowFrames.size
+        for (k in grid.indices) {
+            val v = FloatArray(frames)
+            var m = 0
+            for (row in windowFrames) if (!row[k].isNaN()) v[m++] = row[k]
+            if (m == 0) continue
+            v.sort(0, m)
+            val med = if (m % 2 == 1) v[m / 2] else (v[m / 2 - 1] + v[m / 2]) / 2
+            levels[k] = if (levels[k].isNaN()) med else minOf(levels[k], med)
+        }
+        windowFrames.clear()
     }
 
     /** Every RDS group from the local decoder (Demodulator thread), with the tuned frequency. */
@@ -275,18 +301,23 @@ object LocalFmScan {
         // 1. survey
         frameWanted = true
         suspend fun surveyWindow(c: Long) {
-            synchronized(lock) { framesUsed = 0 }
+            acceptFramesAfterMs = Long.MAX_VALUE
+            synchronized(lock) { windowFrames.clear() }
             if (!file) r.tuneSurvey(c, c + (0.2 * rate).toLong())
             val t0 = System.currentTimeMillis()
-            acceptFramesAfterMs = t0 + 350
-            // move on after >= 6 frames and 0.8 s, or after 4 s regardless
+            // give the hardware time to retune and the FFT's buffered samples time to drain; frames
+            // from before the retune that still get through are outvoted by the median (finishWindow)
+            acceptFramesAfterMs = t0 + 500
+            // move on after >= 9 frames and 1.2 s, or after 5 s regardless
             while (true) {
                 delay(100)
                 checkRunning(r)
                 val dt = System.currentTimeMillis() - t0
-                val frames = synchronized(lock) { framesUsed }
-                if ((frames >= 6 && dt > 800) || dt > 4000) break
+                val frames = synchronized(lock) { windowFrames.size }
+                if ((frames >= 9 && dt > 1200) || dt > 5000) break
             }
+            acceptFramesAfterMs = Long.MAX_VALUE
+            finishWindow()
         }
         for ((i, c) in centers.withIndex()) {
             stage("Surveying the band", 0.3f * i / centers.size)
@@ -335,6 +366,12 @@ object LocalFmScan {
                     }
                 }
             }
+            // No RDS, no pilot and no carrier when actually tuned: something the survey saw that isn't
+            // there (a leftover frame or a mirror image the median/minimum didn't catch). Drop it.
+            if (!p.rds && !p.stereo && p.levelDb < floor + cfg.thresholdDb / 2) {
+                note(String.format(Locale.US, "%6.1f MHz  dropped: no carrier when tuned (level %.1f dB, floor %.1f dB)", p.frequencyMhz, p.levelDb, floor))
+                continue
+            }
             note(presetLogLine(p))
             found += p
         }
@@ -359,7 +396,7 @@ object LocalFmScan {
      */
     private suspend fun listen(r: Radio, freq: Long, candidate: Long, surveyLevel: Float, snr: Float, cfg: FmScanConfig, neighbour: Boolean): FmPreset {
         stationRds.reset()
-        synchronized(lock) { levelSum = 0.0; levelN = 0 }
+        synchronized(lock) { verifyLevels.clear() }
         verifyFrequency = freq
         r.tuneChannel(freq)
         val t0 = System.currentTimeMillis()
@@ -398,7 +435,8 @@ object LocalFmScan {
         }
         verifyFrequency = 0L
         val m = LocalDiagnostics.fm.value
-        val level = synchronized(lock) { if (levelN > 0) (levelSum / levelN).toFloat() else surveyLevel }
+        // median over the frames: the first ones after the retune can still show the previous frequency
+        val level = synchronized(lock) { if (verifyLevels.isEmpty()) surveyLevel else verifyLevels.sorted()[verifyLevels.size / 2] }
         val rds = snap.pi != null
         val bler: Float? = if (!rds) null else blocksAtPi?.let { (o, c, f) ->
             val ok = (m.blocksOk - o).coerceAtLeast(0) + (m.blocksCorrected - c).coerceAtLeast(0)

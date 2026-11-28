@@ -1709,6 +1709,18 @@ class MainViewModel @Inject constructor(
         override fun tuneChannel(frequencyHz: Long) {
             val label = com.mantz_it.rfanalyzer.addon.fm.LocalFmScan.presetAt(frequencyHz)?.label()
                 ?: String.format(java.util.Locale.US, "%.1f MHz", frequencyHz / 1e6)
+            // The Tuner keeps the source where it is while the channel is anywhere in the received
+            // span, also at its edge, where the SDR's anti-alias filter weakens the station (the
+            // HackRF's passes only about +-0.375 of the sample rate), or on the DC spike. For a
+            // station, put the source at a fixed offset instead: the channel then sits in the flat
+            // part, 400 kHz below the source frequency (the offset the Tuner itself uses for WFM).
+            val rate = asr.sourceSampleRate.value
+            val off = frequencyHz - asr.sourceFrequency.value
+            if (asr.sourceType.value != SourceType.FILESOURCE && (kotlin.math.abs(off) > 0.3 * rate || kotlin.math.abs(off) < 150_000)) {
+                val src = (frequencyHz + minOf(400_000L, rate / 4)).coerceIn(asr.sourceMinimumFrequency.value, asr.sourceMaximumFrequency.value)
+                asr.sourceFrequency.set(src)
+                asr.viewportFrequency.set(src) // centred on the received span, so the Tuner sees it fits
+            }
             tuner.tune(wfm(label, frequencyHz)) { startAnalyzerAfterTuneTo() }
         }
 

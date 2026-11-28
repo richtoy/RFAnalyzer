@@ -14,7 +14,7 @@ import kotlin.math.abs
 
 /**
  * End-to-end run of the FM band scan driver ([LocalFmScan]) against a simulated radio: spectrum
- * frames with three carriers for the survey, then per station the decoder's metrics (pilot) and RDS
+ * frames with three carriers (plus stale frames after each retune and mirror images) for the survey, then per station the decoder's metrics (pilot) and RDS
  * groups. Covers survey -> candidates -> verify -> neighbour retry -> same-PI marking -> presets.
  * Runs in real time over a narrow band (about 30 s).
  */
@@ -30,16 +30,38 @@ class LocalFmScanTest {
         val tuned = ArrayList<Long>()
         private val rnd = Random(1)
 
+        /** When the source was last retuned, and where it was before. */
+        @Volatile var retunedAt = 0L
+        @Volatile var previousSource = source
+
+        /**
+         * One spectrum frame like FftProcessor's, including its two flaws: for 700 ms after a retune
+         * the frames still show the old frequency's signal (labelled with the new one), and every
+         * station leaves a mirror image 30 dB down on the other side of the centre (IQ imbalance).
+         */
         fun frame(): ByteArray {
             val n = 2048
             val mag = ByteArray(n)
+            val shown = if (System.currentTimeMillis() - retunedAt < 700) previousSource else source
             for (i in 0 until n) {
-                val f = source - rate / 2 + i * rate / n
+                val off = -rate / 2 + i * rate / n
+                val f = shown + off
+                val mirror = shown - off
                 var db = -100f + rnd.nextFloat()
-                for (s in stations) if (abs(f - s.hz) < 80_000) db = maxOf(db, s.levelDb)
+                for (s in stations) {
+                    if (abs(f - s.hz) < 80_000) db = maxOf(db, s.levelDb)
+                    if (abs(mirror - s.hz) < 80_000) db = maxOf(db, s.levelDb - 30f)
+                }
                 mag[i] = ((db + 150f) / (160f / 255f)).toInt().coerceIn(0, 255).toByte()
             }
             return mag
+        }
+
+        private fun retune(to: Long) {
+            if (to == source) return
+            previousSource = source
+            retunedAt = System.currentTimeMillis()
+            source = to
         }
 
         val thread = Thread {
@@ -73,12 +95,12 @@ class LocalFmScanTest {
         override fun isRunning() = true
         override fun channelFrequency() = channel
         override fun prepare() {}
-        override fun tuneSurvey(sourceHz: Long, channelHz: Long) { source = sourceHz; channel = channelHz }
+        override fun tuneSurvey(sourceHz: Long, channelHz: Long) { retune(sourceHz); channel = channelHz }
         override fun tuneChannel(frequencyHz: Long) {
             tuned += frequencyHz
             channel = frequencyHz
             // keep the channel inside the band the source receives
-            if (abs(frequencyHz - source) > rate / 3) source = frequencyHz + 300_000
+            if (abs(frequencyHz - source) > rate / 3) retune(frequencyHz + 300_000)
         }
         override fun snapshot(): () -> Unit = {}
     }
@@ -119,5 +141,7 @@ class LocalFmScanTest {
         assertEquals("TESTFM", c.ps)
         assertFalse(c.stereo)
         assertTrue(log.last(), log.last().startsWith("=== FM scan finished: 3 stations, 2 with RDS"))
+        // no ghosts from the stale frames or the mirror images
+        assertEquals(log.joinToString("\n"), 3L, p.size.toLong())
     }
 }
