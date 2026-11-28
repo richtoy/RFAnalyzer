@@ -9,6 +9,8 @@ import com.mantz_it.rfanalyzer.addon.fm.isMixedPage
 import com.mantz_it.rfanalyzer.addon.fm.levelAt
 import com.mantz_it.rfanalyzer.addon.fm.markSamePi
 import com.mantz_it.rfanalyzer.addon.fm.pickCandidates
+import com.mantz_it.rfanalyzer.addon.fm.profileChanged
+import com.mantz_it.rfanalyzer.addon.fm.spectrumProfile
 import com.mantz_it.rfanalyzer.addon.fm.psDistance
 import com.mantz_it.rfanalyzer.addon.fm.rdsCountry
 import org.junit.Assert.assertEquals
@@ -169,5 +171,16 @@ class FmScanCoreTest {
         assertEquals(0x8201, r.snapshot().pi)
         assertEquals(name, r.snapshot().ps)
         assertEquals(10, r.snapshot().pty)
+    }
+
+    @Test
+    fun profileTellsStaleFromFreshFrames() {
+        val rnd = java.util.Random(5)
+        fun frame(stationBin: Int) = FloatArray(2048) { i -> -100f + 3f * rnd.nextFloat() + if (kotlin.math.abs(i - stationBin) < 80) 50f else 0f }
+        val before = spectrumProfile(frame(500), 2048)
+        // the same signal again (a stale frame, other noise): no change
+        assertFalse(profileChanged(before, spectrumProfile(frame(500), 2048)))
+        // the station moved by a survey step (about a quarter of the span): changed
+        assertTrue(profileChanged(before, spectrumProfile(frame(1050), 2048)))
     }
 }

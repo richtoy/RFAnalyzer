@@ -117,6 +117,19 @@ object LocalFmScan {
     /** Frames are used only after this time (the hardware retunes and the FFT settles). */
     @Volatile private var acceptFramesAfterMs = Long.MAX_VALUE
     private var liveSource = true
+
+    // --- telling stale frames from fresh ones after a retune (see [markRetune]) ---
+    /** Coarse spectrum of the newest frame, and of the last frame before the latest retune. */
+    private var lastProfile: FloatArray? = null
+    private var beforeProfile: FloatArray? = null
+    private var retuneAtMs = 0L
+    /** The frames show the new frequency's samples (since [freshSinceMs]). */
+    private var fresh = true
+    private var freshSinceMs = 0L
+    /** Frames still to skip after the change: their FFT window can mix old and new samples. */
+    private var skipFrames = 0
+    /** How long frames may stay stale before they are used anyway (a retune that changes nothing visible). */
+    private const val STALE_FALLBACK_MS = 2500L
     /** While verifying: the channel being checked, and its level in each frame. */
     @Volatile private var verifyFrequency = 0L
     private val verifyLevels = ArrayList<Float>()
@@ -138,11 +151,29 @@ object LocalFmScan {
      * invScale), index 0 at [frequency] - [sampleRate]/2.
      */
     fun onFftFrame(mag: ByteArray, frequency: Long, sampleRate: Long, minDb: Float, invScale: Float) {
-        if (!frameWanted || System.currentTimeMillis() < acceptFramesAfterMs) return
+        if (!frameWanted) return
+        val now = System.currentTimeMillis()
         synchronized(lock) {
             val n = mag.size
             if (dbScratch.size < n) dbScratch = FloatArray(n)
             for (i in 0 until n) dbScratch[i] = minDb + (mag[i].toInt() and 0xFF) * invScale
+            val profile = spectrumProfile(dbScratch, n)
+            // After a retune FftProcessor labels frames with the new frequency at once, but the
+            // samples between the radio and the FFT (USB transfers, the scheduler, the FFT's ring
+            // buffer: up to about a second at 2 Msps) are still from the old one. Such frames are
+            // the same spectrum as the last frame before the retune; the fresh ones differ.
+            if (!fresh) {
+                val before = beforeProfile
+                if (before == null || profileChanged(before, profile) || now - retuneAtMs > STALE_FALLBACK_MS) {
+                    fresh = true
+                    freshSinceMs = now
+                    skipFrames = 2
+                }
+            }
+            lastProfile = profile
+            if (!fresh) return
+            if (skipFrames > 0) { skipFrames--; return }
+            if (now < acceptFramesAfterMs) return
             val c = frequency.toDouble(); val r = sampleRate.toDouble()
             val f = verifyFrequency
             if (f != 0L) {
@@ -155,6 +186,20 @@ object LocalFmScan {
             windowFrames += row
         }
     }
+
+    /**
+     * Call right after retuning: frames are ignored until they show the new samples (their coarse
+     * spectrum differs from the last frame before the retune), or after [STALE_FALLBACK_MS].
+     */
+    private fun markRetune() = synchronized(lock) {
+        beforeProfile = lastProfile?.copyOf()
+        retuneAtMs = System.currentTimeMillis()
+        fresh = false
+        skipFrames = 0
+    }
+
+    /** Milliseconds since the frames started showing the new frequency, or -1 while still stale. */
+    private fun freshForMs(): Long = synchronized(lock) { if (fresh) System.currentTimeMillis() - freshSinceMs else -1L }
 
     /**
      * Ends a survey window: each channel's level in it is the median over its frames, and a
@@ -300,21 +345,21 @@ object LocalFmScan {
 
         // 1. survey
         frameWanted = true
+        delay(500) // a frame of the current tuning, for the first retune to compare against
         suspend fun surveyWindow(c: Long) {
             acceptFramesAfterMs = Long.MAX_VALUE
             synchronized(lock) { windowFrames.clear() }
-            if (!file) r.tuneSurvey(c, c + (0.2 * rate).toLong())
+            if (!file) { r.tuneSurvey(c, c + (0.2 * rate).toLong()); markRetune() }
             val t0 = System.currentTimeMillis()
-            // give the hardware time to retune and the FFT's buffered samples time to drain; frames
-            // from before the retune that still get through are outvoted by the median (finishWindow)
-            acceptFramesAfterMs = t0 + 500
-            // move on after >= 9 frames and 1.2 s, or after 5 s regardless
+            acceptFramesAfterMs = t0 + 150
+            // frames count once they show the new frequency (markRetune); move on after >= 8 such
+            // frames over >= 0.8 s, or after 7 s regardless
             while (true) {
                 delay(100)
                 checkRunning(r)
                 val dt = System.currentTimeMillis() - t0
                 val frames = synchronized(lock) { windowFrames.size }
-                if ((frames >= 9 && dt > 1200) || dt > 5000) break
+                if ((frames >= 8 && freshForMs() > 800) || dt > 7000) break
             }
             acceptFramesAfterMs = Long.MAX_VALUE
             finishWindow()
@@ -399,8 +444,9 @@ object LocalFmScan {
         synchronized(lock) { verifyLevels.clear() }
         verifyFrequency = freq
         r.tuneChannel(freq)
+        markRetune() // the tuned level counts only from frames that show the new frequency
         val t0 = System.currentTimeMillis()
-        acceptFramesAfterMs = t0 + 500
+        acceptFramesAfterMs = t0 + 300
         val track = PsTrack()
         var pilotSeen = 0
         var lastMetricsTs = 0L

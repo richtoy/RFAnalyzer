@@ -14,7 +14,7 @@ import kotlin.math.abs
 
 /**
  * End-to-end run of the FM band scan driver ([LocalFmScan]) against a simulated radio: spectrum
- * frames with three carriers (plus stale frames after each retune and mirror images) for the survey, then per station the decoder's metrics (pilot) and RDS
+ * frames with three carriers (plus 1.2 s of stale frames after each retune, longer than any fixed wait, and mirror images) for the survey, then per station the decoder's metrics (pilot) and RDS
  * groups. Covers survey -> candidates -> verify -> neighbour retry -> same-PI marking -> presets.
  * Runs in real time over a narrow band (about 30 s).
  */
@@ -35,14 +35,14 @@ class LocalFmScanTest {
         @Volatile var previousSource = source
 
         /**
-         * One spectrum frame like FftProcessor's, including its two flaws: for 700 ms after a retune
+         * One spectrum frame like FftProcessor's, including its two flaws: for 1.2 s after a retune
          * the frames still show the old frequency's signal (labelled with the new one), and every
          * station leaves a mirror image 30 dB down on the other side of the centre (IQ imbalance).
          */
         fun frame(): ByteArray {
             val n = 2048
             val mag = ByteArray(n)
-            val shown = if (System.currentTimeMillis() - retunedAt < 700) previousSource else source
+            val shown = if (System.currentTimeMillis() - retunedAt < 1200) previousSource else source
             for (i in 0 until n) {
                 val off = -rate / 2 + i * rate / n
                 val f = shown + off

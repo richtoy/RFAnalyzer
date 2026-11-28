@@ -172,6 +172,34 @@ fun pickCandidates(levels: FloatArray, thresholdDb: Float): Pair<Float, List<Int
     return Pair(floor, out)
 }
 
+/**
+ * A coarse picture of a spectrum frame: the mean dB of each of [blocks] equal slices of its [n] bins.
+ * Coarse enough that noise averages out, fine enough that a station moving by a survey step shows.
+ */
+fun spectrumProfile(db: FloatArray, n: Int, blocks: Int = 64): FloatArray {
+    val out = FloatArray(blocks)
+    for (b in 0 until blocks) {
+        val a = b * n / blocks
+        val e = maxOf((b + 1) * n / blocks, a + 1)
+        var s = 0f
+        for (i in a until e) s += db[i]
+        out[b] = s / (e - a)
+    }
+    return out
+}
+
+/**
+ * True when [now] shows a different signal than [before] (at least [minBlocks] slices differ by
+ * [thresholdDb] or more). Used to tell when the frames after a retune stop showing the samples
+ * received before it: those frames are the same spectrum as the last one before the retune.
+ */
+fun profileChanged(before: FloatArray, now: FloatArray, thresholdDb: Float = 6f, minBlocks: Int = 3): Boolean {
+    if (before.size != now.size) return true
+    var n = 0
+    for (i in before.indices) if (abs(now[i] - before[i]) >= thresholdDb) n++
+    return n >= minBlocks
+}
+
 /** Pads/cuts a PS to its 8 character positions. */
 private fun pad8(s: String): CharArray = CharArray(8) { if (it < s.length) s[it] else ' ' }
 
