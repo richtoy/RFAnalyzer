@@ -701,6 +701,8 @@ fun DemodulationTabComposable(
                                 helpSubPath = "demodulation.html#stereo-rds",
                             )
                             if (LocalDecoders.enabled && wfmStereoAndRdsEnabled) LocalFmControls()
+                            // Richard's fork: FM band scan and presets (the scan switches Stereo & RDS on itself)
+                            if (LocalDecoders.enabled) com.mantz_it.rfanalyzer.addon.ui.FmStationsPanel(channelFrequency)
                             OutlinedEnumDropDown(
                                 label = "RDS Programme Types",
                                 enumClass = RdsPtyTable::class,

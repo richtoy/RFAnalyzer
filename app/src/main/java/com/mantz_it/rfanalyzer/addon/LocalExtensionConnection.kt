@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.mantz_it.rfanalyzer.addon.dab.DabReceiver
 import com.mantz_it.rfanalyzer.addon.dab.LocalDab
+import com.mantz_it.rfanalyzer.addon.fm.LocalFmScan
 import com.mantz_it.rfanalyzer.addon.fm.MpxDemodulator
 import com.mantz_it.rfanalyzer.addon.rds.RdsBlockSync
 import com.mantz_it.rfanalyzer.addon.rds.RdsDemodulator
@@ -98,6 +99,7 @@ class LocalExtensionConnection(
         lastSignOfLifeMs = lastBindMs
         resetDecoders()
         LocalDab.init(context)
+        LocalFmScan.init(context)
         _connectionState.value = ExtensionConnectionState.CONNECTED
         LocalDiagnostics.setActive(true)
         Log.i(TAG, "bind: local decoders started")
@@ -224,9 +226,12 @@ class LocalExtensionConnection(
         val events = try { rdsParser.parse(blocks) } catch (e: Exception) {
             Log.w(TAG, "onRdsGroup: parser failed: ${e.message}"); emptyList()
         }
+        // a group whose PI is not confirmed yet is dropped entirely (see RdsGroupParser.parse)
+        if (rdsParser.lastGroupHeld) return
         val raw = ByteArray(8)
         for (i in 0..3) { raw[2 * i] = (blocks[i] ushr 8).toByte(); raw[2 * i + 1] = blocks[i].toByte() }
         LocalDiagnostics.onRdsGroup(blocks)
+        LocalFmScan.onRdsGroup(blocks, currentFrequency)
         onPacket(RdsPacket(timestampMs = System.currentTimeMillis(), frequencyHz = currentFrequency, raw = raw.toBytes(), events = events))
     }
 

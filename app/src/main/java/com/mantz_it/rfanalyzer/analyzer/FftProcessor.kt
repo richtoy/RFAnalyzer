@@ -320,6 +320,10 @@ class FftProcessor(
                 squelchGate.update(channelLevel, noiseFloor(magBytes, channelStartIndex, channelEnd), System.currentTimeMillis())
                 onChannelLevelChanged(channelLevel)
             }
+            // Richard's fork: the FM band scan surveys the band from these frames (LocalFmScan).
+            if (com.mantz_it.rfanalyzer.addon.fm.LocalFmScan.frameWanted) {
+                com.mantz_it.rfanalyzer.addon.fm.LocalFmScan.onFftFrame(magBytes, currentFrequency, currentSampleRate, MIN_DB, INV_SCALE)
+            }
 
             // --- Put the results into fftProcessorData
             try {
